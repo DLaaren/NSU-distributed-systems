@@ -7,22 +7,18 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
 	// "lab1/worker"
 )
 
-type Config struct {
+type ServerContext struct {
 	Port               string `yaml:"port"`
 	CoordinatorAddress string `yaml:"coordinator_address"`
-}
-
-type ServerContext struct {
-	Port               string
-	CoordinatorAddress string
 	// Worker *worker.Worker
-	// rwmu        sync.RWMutex
+	rwmu sync.RWMutex
 }
 
 var context ServerContext
@@ -31,19 +27,17 @@ func getWorkerStatus(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func parse_configs() (*Config, error) {
-	var config Config
-
+func parse_configs() error {
 	file, err := os.ReadFile("config.yaml")
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	if err := yaml.Unmarshal(file, &config); err != nil {
-		return nil, err
+	if err := yaml.Unmarshal(file, &context); err != nil {
+		return err
 	}
 
-	return &config, nil
+	return nil
 }
 
 func connect_to_coordinator() error {
@@ -89,21 +83,14 @@ func connect_to_coordinator() error {
 func main() {
 	log.SetPrefix("[Server]: ")
 
+	context = ServerContext{}
+
 	/* parse configs */
-	config, err := parse_configs()
-	if err != nil {
+	if err := parse_configs(); err != nil {
 		log.Println("error while parsing config file:", err)
 		return
 	}
 	log.Println("configs were parsed sucessfully")
-
-	/* define server context */
-	context = ServerContext{
-		Port:               config.Port,
-		CoordinatorAddress: config.CoordinatorAddress,
-		// Worker:
-	}
-	log.Println("server context was created")
 
 	http.HandleFunc("/api/worker/status", getWorkerStatus)
 
