@@ -2,14 +2,15 @@ package main
 
 import (
 	"encoding/json"
-	"lab1/coordinator"
-	"lab1/worker"
 	"log"
 	"net/http"
 	"os"
 	"sync"
 
 	"gopkg.in/yaml.v3"
+
+	"lab1/coordinator"
+	"lab1/worker"
 )
 
 type Config struct {
@@ -26,7 +27,7 @@ type ServerContext struct {
 var context ServerContext
 
 func registerNewWorker(w http.ResponseWriter, r *http.Request) {
-
+	log.Println("new worker wow")
 }
 
 func getRequestStatusHandler(w http.ResponseWriter, r *http.Request) {
@@ -54,14 +55,12 @@ func submitRequestCrackHandler(w http.ResponseWriter, r *http.Request) {
 func parse_configs() (*Config, error) {
 	var config Config
 
-	file, err := os.ReadFile("coordinator/main/config.yaml")
+	file, err := os.ReadFile("config.yaml")
 	if err != nil {
-		log.Printf("error while reading config file: %s\n", err)
 		return nil, err
 	}
 
 	if err := yaml.Unmarshal(file, &config); err != nil {
-		log.Printf("error while parsing config file: %s\n", err)
 		return nil, err
 	}
 
@@ -74,7 +73,7 @@ func main() {
 	/* parse configs */
 	config, err := parse_configs()
 	if err != nil {
-		log.Println("error while parsing config file")
+		log.Println("error while parsing config file:", err)
 		return
 	}
 	log.Println("configs were parsed sucessfully")
