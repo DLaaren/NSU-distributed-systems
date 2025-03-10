@@ -6,11 +6,12 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"lab1/coordinator"
-	"lab1/worker"
+	"lab1/shared"
 )
 
 type ServerContext struct {
@@ -20,20 +21,23 @@ type ServerContext struct {
 
 var context ServerContext
 
-func registerNewWorker(w http.ResponseWriter, r *http.Request) {
+func registerNewWorkerHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "invalid request method", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var worker worker.Worker
-	err := json.NewDecoder(r.Body).Decode(&worker)
+	var worker coordinator.Worker
+	var workerStatus coordinator.WorkerStatusResponse
+	err := json.NewDecoder(r.Body).Decode(&workerStatus)
 	if err != nil {
 		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
 		return
 	}
 
 	worker.Address = r.RemoteAddr
+	worker.LastHB = time.Now()
+	worker.Status = workerStatus.Status
 	context.Coordinator.RegisterWorker(&worker)
 
 	w.WriteHeader(http.StatusOK)
@@ -56,12 +60,11 @@ func getRequestStatusHandler(w http.ResponseWriter, r *http.Request) {
 		log.Fatal(err)
 	}
 
-	response := context.Coordinator.UserRequestStatus(coordinator.UserRequestId(value))
+	response := context.Coordinator.UserRequestStatus(shared.Id(value))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
-
 }
 
 func submitRequestCrackHandler(w http.ResponseWriter, r *http.Request) {
@@ -108,7 +111,7 @@ func main() {
 	context.Coordinator = coordinator.NewCoordinator()
 
 	/* define handlers */
-	http.HandleFunc("/api/worker/register", registerNewWorker)
+	http.HandleFunc("/api/worker/register", registerNewWorkerHandler)
 	http.HandleFunc("/api/hash/status", getRequestStatusHandler)
 	http.HandleFunc("/api/hash/crack", submitRequestCrackHandler)
 
@@ -120,6 +123,10 @@ func main() {
 			log.Printf("error while starting server: %s\n", err)
 			return
 		}
+	}()
+
+	go func() {
+		context.Coordinator.CheckWorkers()
 	}()
 
 	/* to keep the main goroutine alive */

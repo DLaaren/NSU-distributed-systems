@@ -1,17 +1,17 @@
 package coordinator
 
-type UserRequestId uint32
+import "lab1/shared"
 
 type UserRequestStatus int
 
 const (
-	IN_PROGRESS UserRequestStatus = iota
+	PROCESSING UserRequestStatus = iota
 	READY
-	TIMEPIT_ERROR
+	TIMEOUT_ERROR
 )
 
 type UserRequest struct {
-	RequestId UserRequestId
+	Id        shared.Id
 	Hash      string `json:"hash"`
 	MaxLength uint32 `json:"maxLength"`
 	Status    UserRequestStatus
@@ -19,7 +19,7 @@ type UserRequest struct {
 }
 
 type UserResponse struct {
-	RequestId UserRequestId `json:"requestId"`
+	RequestId shared.Id `json:"requestId"`
 }
 
 type UserStatusResponse struct {
