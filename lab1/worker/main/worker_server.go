@@ -7,23 +7,30 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
-	// "lab1/worker"
+
+	"lab1/worker"
 )
 
 type ServerContext struct {
 	Port               string `yaml:"port"`
 	CoordinatorAddress string `yaml:"coordinator_address"`
-	// Worker *worker.Worker
-	rwmu sync.RWMutex
+	Worker             *worker.Worker
 }
 
 var context ServerContext
 
 func getWorkerStatus(w http.ResponseWriter, r *http.Request) {
+
+}
+
+func submitTaskHandler(w http.ResponseWriter, r *http.Request) {
+
+}
+
+func killTaskHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
@@ -40,13 +47,11 @@ func parse_configs() error {
 	return nil
 }
 
-func connect_to_coordinator() error {
+func register_worker() error {
 	retryDelay := 5 * time.Second
 	maxRetries := 2
 
-	requestBody := struct {
-		Address string `json:"address"`
-	}{"127.0.0.1" + context.Port}
+	requestBody := context.Worker
 
 	var buf bytes.Buffer
 
@@ -83,8 +88,6 @@ func connect_to_coordinator() error {
 func main() {
 	log.SetPrefix("[Server]: ")
 
-	context = ServerContext{}
-
 	/* parse configs */
 	if err := parse_configs(); err != nil {
 		log.Println("error while parsing config file:", err)
@@ -92,9 +95,15 @@ func main() {
 	}
 	log.Println("configs were parsed sucessfully")
 
-	http.HandleFunc("/api/worker/status", getWorkerStatus)
+	context.Worker = worker.NewWorker("localhost:" + context.Port)
 
-	if err := connect_to_coordinator(); err != nil {
+	http.HandleFunc("/internal/api/worker/status", getWorkerStatus)
+	http.HandleFunc("/internal/api/worker/crack", submitTaskHandler)
+	http.HandleFunc("/internal/api/worker/kill", killTaskHandler)
+
+	log.Println("all handlers were set up")
+
+	if err := register_worker(); err != nil {
 		log.Println("failed to register worker after retries:", err)
 		return
 	}

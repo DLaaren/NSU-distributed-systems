@@ -5,10 +5,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 
 	"gopkg.in/yaml.v3"
 
 	"lab1/coordinator"
+	"lab1/worker"
 )
 
 type ServerContext struct {
@@ -19,10 +21,46 @@ type ServerContext struct {
 var context ServerContext
 
 func registerNewWorker(w http.ResponseWriter, r *http.Request) {
-	log.Println("new worker wow")
+	if r.Method != http.MethodPost {
+		http.Error(w, "invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var worker worker.Worker
+	err := json.NewDecoder(r.Body).Decode(&worker)
+	if err != nil {
+		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+
+	worker.Address = r.RemoteAddr
+	context.Coordinator.RegisterWorker(&worker)
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("worker registered successfully"))
+
+	log.Println("new worker with address", worker.Address, "was registered")
 }
 
 func getRequestStatusHandler(w http.ResponseWriter, r *http.Request) {
+	queryParams := r.URL.Query()
+
+	requestId := queryParams.Get("requestId")
+	if requestId == "" {
+		http.Error(w, "missing requestId parameter", http.StatusBadRequest)
+		return
+	}
+
+	value, err := strconv.ParseUint(requestId, 10, 32)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	response := context.Coordinator.UserRequestStatus(coordinator.UserRequestId(value))
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 
 }
 
@@ -60,10 +98,6 @@ func parse_configs() error {
 func main() {
 	log.SetPrefix("[Server]: ")
 
-	context = ServerContext{
-		Coordinator: coordinator.NewCoordinator(),
-	}
-
 	/* parse configs */
 	if err := parse_configs(); err != nil {
 		log.Println("error while parsing config file:", err)
@@ -71,13 +105,13 @@ func main() {
 	}
 	log.Println("configs were parsed sucessfully")
 
+	context.Coordinator = coordinator.NewCoordinator()
+
 	/* define handlers */
 	http.HandleFunc("/api/worker/register", registerNewWorker)
 	http.HandleFunc("/api/hash/status", getRequestStatusHandler)
 	http.HandleFunc("/api/hash/crack", submitRequestCrackHandler)
-	// http.HandleFunc("/task/launch", )
-	// http.HandleFunc("/task/status", )
-	// http.HandleFunc("/task/kill", )
+
 	log.Println("all handlers were set up")
 
 	go func() {
