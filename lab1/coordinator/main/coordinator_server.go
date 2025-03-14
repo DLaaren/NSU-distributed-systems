@@ -85,6 +85,22 @@ func submitRequestCrackHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+func getTaskResultHandler(w http.ResponseWriter, r *http.Request) {
+	queryParams := r.URL.Query()
+
+	taskId := queryParams.Get("taskId")
+	if taskId == "" {
+		http.Error(w, "missing requestId parameter", http.StatusBadRequest)
+		return
+	}
+
+	value, err := strconv.ParseUint(taskId, 10, 32)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+}
+
 func parse_configs() error {
 	file, err := os.ReadFile("config.yaml")
 	if err != nil {
@@ -114,6 +130,7 @@ func main() {
 	http.HandleFunc("/api/worker/register", registerNewWorkerHandler)
 	http.HandleFunc("/api/hash/status", getRequestStatusHandler)
 	http.HandleFunc("/api/hash/crack", submitRequestCrackHandler)
+	http.HandleFunc("/internal/api/task/result", getTaskResultHandler)
 
 	log.Println("all handlers were set up")
 

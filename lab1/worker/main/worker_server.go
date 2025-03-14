@@ -6,8 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"lab1/coordinator"
-	"lab1/shared"
 	"log"
 	"net/http"
 	"os"
@@ -15,6 +13,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"lab1/coordinator"
+	"lab1/shared"
 
 	"gopkg.in/yaml.v3"
 )
@@ -24,7 +25,8 @@ type ServerContext struct {
 	CoordinatorAddress string `yaml:"coordinator_address"`
 	WorkerStatus       coordinator.WorkerStatus
 	Tasks              map[shared.Id]*shared.WorkerTask
-	rwmu               sync.RWMutex
+
+	rwmu sync.RWMutex
 }
 
 var context ServerContext
@@ -103,21 +105,23 @@ func submitTaskHandler(w http.ResponseWriter, r *http.Request) {
 	task.Status = shared.DONE_FAILURE
 	task.Result = ""
 	context.rwmu.Unlock()
+
+	// send answer to coordinator
 }
 
 func killTaskHandler(w http.ResponseWriter, r *http.Request) {
-	queryParams := r.URL.Query()
+	// queryParams := r.URL.Query()
 
-	requestId := queryParams.Get("requestId")
-	if requestId == "" {
-		http.Error(w, "missing requestId parameter", http.StatusBadRequest)
-		return
-	}
+	// requestId := queryParams.Get("requestId")
+	// if requestId == "" {
+	// 	http.Error(w, "missing requestId parameter", http.StatusBadRequest)
+	// 	return
+	// }
 
-	value, err := strconv.ParseUint(requestId, 10, 32)
-	if err != nil {
-		log.Fatal(err)
-	}
+	// value, err := strconv.ParseUint(requestId, 10, 32)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
 
 }
 
@@ -151,7 +155,6 @@ func register_worker() error {
 			"http://"+context.CoordinatorAddress+"/api/worker/register",
 			"aplication/json",
 			&buf)
-
 		if err != nil {
 			return err
 		}

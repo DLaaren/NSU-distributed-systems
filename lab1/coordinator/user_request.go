@@ -8,6 +8,7 @@ const (
 	PROCESSING UserRequestStatus = iota
 	READY
 	TIMEOUT_ERROR
+	ERROR
 )
 
 type UserRequest struct {

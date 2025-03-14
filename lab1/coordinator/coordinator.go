@@ -1,12 +1,17 @@
 package coordinator
 
 import (
+	"bytes"
+	"container/list"
 	"encoding/json"
-	"lab1/shared"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+
+	"lab1/shared"
 
 	"github.com/google/uuid"
 )
@@ -14,6 +19,7 @@ import (
 type Coordinator struct {
 	UserRequests map[shared.Id]*UserRequest
 	Workers      map[string]*Worker
+	WorkersTasks map[shared.Id]*shared.WorkerTask
 
 	rwmu sync.RWMutex
 }
@@ -88,19 +94,88 @@ func (c *Coordinator) getWorkerStatus(address string) WorkerStatus {
 	return statusResponse.Status
 }
 
+/* Trearing each string as a base-26 number */
+func stringToInt(s string) int64 {
+	var result int64
+	for _, r := range s {
+		result = result*26 + int64(r-'a')
+	}
+	return result
+}
+
+func intToString(n int64, length int) string {
+	var result string
+	for i := 0; i < length; i++ {
+		result = string('a'+n%26) + result
+		n /= 26
+	}
+	return result
+}
+
+func splitRange(start, end string, numWorkers int) []string {
+	startVal := stringToInt(start)
+	endVal := stringToInt(end)
+	chunkSize := (endVal - startVal) / int64(numWorkers)
+
+	var chunks []string
+	for i := 0; i < numWorkers; i++ {
+		chunkStart := intToString(startVal+int64(i)*chunkSize, len(start))
+		chunkEnd := intToString(startVal+int64(i+1)*chunkSize-1, len(start))
+		if i == numWorkers-1 {
+			/* Ensure the last chunk includes the end value */
+			chunkEnd = end
+		}
+		chunks = append(chunks, fmt.Sprintf("%s-%s", chunkStart, chunkEnd))
+	}
+
+	return chunks
+}
+
 /* Creates task and map it to workers */
 func (c *Coordinator) Crack(request *UserRequest) shared.Id {
 	request.Id = shared.Id(uuid.New().ID())
 	request.Status = PROCESSING
 
 	c.rwmu.Lock()
-	defer c.rwmu.Unlock()
-
 	c.UserRequests[request.Id] = request
+	c.rwmu.Unlock()
 
-	go func() {
+	go func(request *UserRequest) {
+		task := shared.WorkerTask{
+			Id:        shared.Id(uuid.New().ID()),
+			RequestId: request.Id,
+			Hash:      request.Hash,
+			MaxLength: request.MaxLength,
+			Status:    shared.IN_PROGRESS,
+		}
 
-	}()
+		c.rwmu.RLock()
+		num_workers := len(c.Workers)
+		c.rwmu.RUnlock()
+
+		crack_len := request.MaxLength
+		chunks := splitRange(strings.Repeat("a", int(crack_len)), strings.Repeat("z", int(crack_len)), num_workers)
+
+		c.rwmu.RLock()
+		defer c.rwmu.RUnlock()
+		i := 0
+		for {
+			for _, worker := range c.Workers {
+				task.InputRange = chunks[i]
+				res, err := c.TaskLaunch(worker, &task)
+				if res == true && err == nil {
+					i++
+				}
+				if err != nil {
+					request.Status = ERROR
+					break
+				}
+				if i == len(chunks) {
+					break
+				}
+			}
+		}
+	}(request)
 
 	return request.Id
 }
@@ -117,8 +192,30 @@ func (c *Coordinator) UserRequestStatus(requestId shared.Id) UserStatusResponse 
 	}
 }
 
-func (c *Coordinator) TaskLaunch() {
+func (c *Coordinator) TaskLaunch(worker *Worker, task *shared.WorkerTask) (bool, error) {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(task); err != nil {
+		return false, err
+	}
 
+	// Send the HTTP POST request
+	resp, err := http.Post(
+		"http://"+worker.Address+"/internal/api/worker/crack?id=%"+string(task.Id),
+		"application/json",
+		&buf)
+	if err != nil {
+		return false, err
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, nil
+	}
+
+	c.WorkersTasks[task.Id] = task
+
+	return true, nil
 }
 
 func (c *Coordinator) TaskStatus() {
@@ -126,13 +223,5 @@ func (c *Coordinator) TaskStatus() {
 }
 
 func (c *Coordinator) TaskKill() {
-
-}
-
-func (c *Coordinator) Map() {
-
-}
-
-func (c *Coordinator) Reduce() {
 
 }
