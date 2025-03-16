@@ -2,17 +2,17 @@ package coordinator
 
 import "lab1/shared"
 
-type UserRequestStatus int
+type UserRequestStatus string
 
 const (
-	PROCESSING UserRequestStatus = iota
-	READY
-	TIMEOUT_ERROR
-	ERROR
+	PROCESSING    UserRequestStatus = "PROCESSING"
+	READY         UserRequestStatus = "READY"
+	TIMEOUT_ERROR UserRequestStatus = "TIMEOUT_ERROR"
+	ERROR         UserRequestStatus = "ERROR"
 )
 
 type UserRequest struct {
-	Id        shared.Id
+	Id        shared.UserRequestId
 	Hash      string `json:"hash"`
 	MaxLength uint32 `json:"maxLength"`
 	Status    UserRequestStatus
@@ -20,7 +20,7 @@ type UserRequest struct {
 }
 
 type UserResponse struct {
-	RequestId shared.Id `json:"requestId"`
+	RequestId shared.UserRequestId `json:"requestId"`
 }
 
 type UserStatusResponse struct {

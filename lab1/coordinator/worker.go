@@ -1,24 +1,24 @@
 package coordinator
 
 import (
-	"sync"
+	"lab1/shared"
 	"time"
 )
 
-type WorkerStatus int
+type WorkerStatus string
 
 const (
-	IDLE WorkerStatus = iota
-	CRACKING
-	DONE
-	DEAD
+	IDLE     WorkerStatus = "IDLE"
+	CRACKING WorkerStatus = "CRACKING"
+	DONE     WorkerStatus = "DONE"
+	DEAD     WorkerStatus = "DEAD"
 )
 
 type Worker struct {
+	Id      shared.WorkerId
 	Address string       `json:"address"`
 	Status  WorkerStatus `json:"status"`
 	LastHB  time.Time    `json:"lastHb"`
-	rwmu    sync.RWMutex
 }
 
 type WorkerStatusResponse struct {

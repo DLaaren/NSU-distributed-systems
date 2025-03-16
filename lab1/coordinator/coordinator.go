@@ -2,11 +2,12 @@ package coordinator
 
 import (
 	"bytes"
-	"container/list"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,10 +17,19 @@ import (
 	"github.com/google/uuid"
 )
 
+type CoordinatorI interface {
+	GetUserRequestStatus(requestId shared.UserRequestId) UserStatusResponse
+	Crack(request *UserRequest) shared.UserRequestId
+	RegisterWorker(worker *Worker)
+	CheckWorkers()
+}
+
 type Coordinator struct {
-	UserRequests map[shared.Id]*UserRequest
-	Workers      map[string]*Worker
-	WorkersTasks map[shared.Id]*shared.WorkerTask
+	UserRequests        map[shared.UserRequestId]*UserRequest
+	UserRequestsToTasks map[shared.UserRequestId][]*shared.WorkerTask
+	Workers             map[shared.WorkerId]*Worker
+	AddressesToWorkers  map[string]*Worker
+	WorkersTasks        map[shared.TaskId]*shared.WorkerTask
 
 	rwmu sync.RWMutex
 }
@@ -30,9 +40,204 @@ func NewCoordinator() *Coordinator {
 	log.Println("coordinator was created")
 	log.SetPrefix("[Server]: ")
 	return &Coordinator{
-		UserRequests: make(map[shared.Id]*UserRequest, 0),
-		Workers:      make(map[string]*Worker, 0),
+		UserRequests:        make(map[shared.UserRequestId]*UserRequest, 0),
+		UserRequestsToTasks: make(map[shared.UserRequestId][]*shared.WorkerTask, 0),
+		Workers:             make(map[shared.WorkerId]*Worker, 0),
+		AddressesToWorkers:  make(map[string]*Worker, 0),
+		WorkersTasks:        make(map[shared.TaskId]*shared.WorkerTask, 0),
 	}
+}
+
+func (c *Coordinator) GetUserRequestStatus(requestId shared.UserRequestId) UserStatusResponse {
+	c.rwmu.RLock()
+	defer c.rwmu.RUnlock()
+
+	userRequest, found := c.UserRequests[requestId]
+
+	var response UserStatusResponse
+
+	if !found {
+		response = UserStatusResponse{
+			Status: ERROR,
+			Result: "",
+		}
+	} else {
+		response = UserStatusResponse{
+			Status: userRequest.Status,
+			Result: userRequest.Result,
+		}
+	}
+
+	log.SetPrefix("[Coordintor]: ")
+	log.Println("GetUserRequestStatus(" + strconv.FormatUint(uint64(requestId), 10) + ") called; Status =" + string(response.Status) + "Result =" + response.Result)
+	log.SetPrefix("[Server]: ")
+
+	return response
+}
+
+/* Trearing each string as a base-26 number */
+func stringToInt(s string) int32 {
+	var result int32
+	for _, r := range s {
+		result = result*26 + int32(r-'a')
+	}
+	return result
+}
+
+func intToString(n int32, length int) string {
+	var result string
+	for i := 0; i < length; i++ {
+		result = string('a'+n%26) + result
+		n /= 26
+	}
+	return result
+}
+
+func splitRange(start, end string, numWorkers int) []string {
+	startVal := stringToInt(start)
+	endVal := stringToInt(end)
+	chunkSize := (endVal - startVal) / int32(numWorkers)
+
+	var chunks []string
+	for i := 0; i < numWorkers; i++ {
+		chunkStart := intToString(startVal+int32(i)*chunkSize, len(start))
+		chunkEnd := intToString(startVal+int32(i+1)*chunkSize-1, len(start))
+		if i == numWorkers-1 {
+			/* Ensure the last chunk includes the end value */
+			chunkEnd = end
+		}
+		chunks = append(chunks, fmt.Sprintf("%s-%s", chunkStart, chunkEnd))
+	}
+
+	return chunks
+}
+
+func (c *Coordinator) assignTasks(request UserRequest) {
+	task := shared.WorkerTask{
+		RequestId: request.Id,
+		Hash:      request.Hash,
+		MaxLength: request.MaxLength,
+		Status:    shared.IN_PROGRESS,
+	}
+
+	c.rwmu.RLock()
+	numWorkers := len(c.Workers)
+	c.rwmu.RUnlock()
+
+	crack_len := request.MaxLength
+	chunks := splitRange(strings.Repeat("a", int(crack_len)), strings.Repeat("z", int(crack_len)), numWorkers)
+
+	getNextWorker := func(c *Coordinator, numWorkers *int, i int) *Worker {
+		c.rwmu.RLock()
+		*numWorkers = len(c.Workers)
+		workerIndex := shared.WorkerId(i % *numWorkers)
+		worker := c.Workers[workerIndex]
+		c.rwmu.RUnlock()
+
+		return worker
+	}
+
+	retry := 0
+	timeout := 1 * time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	go func() {
+		for i, chunk := range chunks {
+			task.Id = shared.TaskId(uuid.New().ID())
+			task.InputRange = chunk
+		retrytaskLaunch:
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				worker := getNextWorker(c, &numWorkers, i+retry)
+
+				res, err := c.taskLaunch(worker, &task)
+				if !res || err != nil {
+					retry++
+					goto retrytaskLaunch
+				}
+			}
+		}
+	}()
+
+	/* Wait for the context to be done (timeout or cancellation) */
+	<-ctx.Done()
+	if ctx.Err() == context.DeadlineExceeded {
+		c.deleteRequestAndTasks(request)
+
+		log.SetPrefix("[Coordinator]: ")
+		log.Println("timeout while trying to assign tasks for user request with id =" + strconv.FormatUint(uint64(request.Id), 10))
+		log.SetPrefix("[Server]: ")
+	}
+}
+
+func (c *Coordinator) deleteRequestAndTasks(request UserRequest) {
+	c.rwmu.Lock()
+	c.UserRequests[request.Id].Status = TIMEOUT_ERROR
+	for _, task := range c.UserRequestsToTasks[request.Id] {
+		task.Status = shared.KILLED
+	}
+	c.rwmu.Unlock()
+
+	c.rwmu.RLock()
+	for _, task := range c.UserRequestsToTasks[request.Id] {
+		err := c.taskKill(task)
+		if err != nil {
+			task.Status = shared.UNKNOWN
+		}
+	}
+	c.rwmu.RUnlock()
+}
+
+/* Creates task and map it to workers */
+func (c *Coordinator) Crack(request *UserRequest) shared.UserRequestId {
+	request.Id = shared.UserRequestId(uuid.New().ID())
+	request.Status = PROCESSING
+
+	c.rwmu.Lock()
+	c.UserRequests[request.Id] = request
+	c.rwmu.Unlock()
+
+	go c.assignTasks(*request)
+
+	log.SetPrefix("[Coordintor]: ")
+	log.Println("successfully assigned tasks for user request with id =" + strconv.FormatUint(uint64(request.Id), 10))
+	log.SetPrefix("[Server]: ")
+
+	return request.Id
+}
+
+/* Register worker */
+func (c *Coordinator) RegisterWorker(worker *Worker) {
+	c.rwmu.Lock()
+	defer c.rwmu.Unlock()
+
+	_, found := c.AddressesToWorkers[worker.Address]
+	/* If we don't have record about worker with such address then register it as total new to us */
+	if !found {
+		worker.Id = shared.WorkerId(uuid.New().ID())
+	}
+
+	c.Workers[worker.Id] = worker
+	c.AddressesToWorkers[worker.Address] = worker
+
+	log.SetPrefix("[Coordintor]: ")
+	log.Println("registered worker with id =" + strconv.FormatUint(uint64(worker.Id), 10) + "and address =" + worker.Address)
+	log.SetPrefix("[Server]: ")
+}
+
+func (c *Coordinator) DeleteWorker(worker *Worker) {
+	c.rwmu.Lock()
+	defer c.rwmu.Unlock()
+
+	delete(c.Workers, worker.Id)
+	delete(c.AddressesToWorkers, worker.Address)
+
+	log.SetPrefix("[Coordintor]: ")
+	log.Println("deleted worker with id =" + strconv.FormatUint(uint64(worker.Id), 10) + "and address =" + worker.Address)
+	log.SetPrefix("[Server]: ")
 }
 
 /* Send heartbeat to workers
@@ -44,37 +249,32 @@ func (c *Coordinator) CheckWorkers() {
 	deadDelay := 1 * time.Minute
 
 	for range ticker.C {
-		for address, w := range c.Workers {
+		c.rwmu.RLock()
+		workers := make([]*Worker, 0, len(c.Workers))
+		for _, w := range c.Workers {
+			workers = append(workers, w)
+		}
+		c.rwmu.RUnlock()
+
+		for _, w := range workers {
 			response, err := http.Get("http://" + w.Address + "/internal/api/worker/heartbeat")
+
 			if err != nil || response.StatusCode != http.StatusOK {
-				if w.Status == DEAD && time.Now().Sub(w.LastHB) >= deadDelay {
-					c.rwmu.Lock()
-					delete(c.Workers, address)
-					c.rwmu.Unlock()
-					log.SetPrefix("[Coordintor]: ")
-					log.Println("worker with address", address, "was deleted")
-					log.SetPrefix("[Server]: ")
+				if w.Status == DEAD && time.Since(w.LastHB) >= deadDelay {
+					c.DeleteWorker(w)
 				} else {
-					w.rwmu.Lock()
+					c.rwmu.Lock()
 					w.Status = DEAD
-					w.rwmu.Unlock()
+					c.rwmu.Unlock()
 				}
-			} else if err == nil && response.StatusCode == http.StatusOK {
-				w.rwmu.Lock()
+			} else if /* err == nil && */ response.StatusCode == http.StatusOK {
+				c.rwmu.Lock()
 				w.LastHB = time.Now()
-				w.Status = c.getWorkerStatus(address)
-				w.rwmu.Unlock()
+				w.Status = c.getWorkerStatus(w.Address)
+				c.rwmu.Unlock()
 			}
 		}
 	}
-}
-
-/* Register new worker */
-func (c *Coordinator) RegisterWorker(worker *Worker) {
-	c.rwmu.Lock()
-	defer c.rwmu.Unlock()
-
-	c.Workers[worker.Address] = worker
 }
 
 /* Get worker status */
@@ -94,113 +294,14 @@ func (c *Coordinator) getWorkerStatus(address string) WorkerStatus {
 	return statusResponse.Status
 }
 
-/* Trearing each string as a base-26 number */
-func stringToInt(s string) int64 {
-	var result int64
-	for _, r := range s {
-		result = result*26 + int64(r-'a')
-	}
-	return result
-}
-
-func intToString(n int64, length int) string {
-	var result string
-	for i := 0; i < length; i++ {
-		result = string('a'+n%26) + result
-		n /= 26
-	}
-	return result
-}
-
-func splitRange(start, end string, numWorkers int) []string {
-	startVal := stringToInt(start)
-	endVal := stringToInt(end)
-	chunkSize := (endVal - startVal) / int64(numWorkers)
-
-	var chunks []string
-	for i := 0; i < numWorkers; i++ {
-		chunkStart := intToString(startVal+int64(i)*chunkSize, len(start))
-		chunkEnd := intToString(startVal+int64(i+1)*chunkSize-1, len(start))
-		if i == numWorkers-1 {
-			/* Ensure the last chunk includes the end value */
-			chunkEnd = end
-		}
-		chunks = append(chunks, fmt.Sprintf("%s-%s", chunkStart, chunkEnd))
-	}
-
-	return chunks
-}
-
-/* Creates task and map it to workers */
-func (c *Coordinator) Crack(request *UserRequest) shared.Id {
-	request.Id = shared.Id(uuid.New().ID())
-	request.Status = PROCESSING
-
-	c.rwmu.Lock()
-	c.UserRequests[request.Id] = request
-	c.rwmu.Unlock()
-
-	go func(request *UserRequest) {
-		task := shared.WorkerTask{
-			Id:        shared.Id(uuid.New().ID()),
-			RequestId: request.Id,
-			Hash:      request.Hash,
-			MaxLength: request.MaxLength,
-			Status:    shared.IN_PROGRESS,
-		}
-
-		c.rwmu.RLock()
-		num_workers := len(c.Workers)
-		c.rwmu.RUnlock()
-
-		crack_len := request.MaxLength
-		chunks := splitRange(strings.Repeat("a", int(crack_len)), strings.Repeat("z", int(crack_len)), num_workers)
-
-		c.rwmu.RLock()
-		defer c.rwmu.RUnlock()
-		i := 0
-		for {
-			for _, worker := range c.Workers {
-				task.InputRange = chunks[i]
-				res, err := c.TaskLaunch(worker, &task)
-				if res == true && err == nil {
-					i++
-				}
-				if err != nil {
-					request.Status = ERROR
-					break
-				}
-				if i == len(chunks) {
-					break
-				}
-			}
-		}
-	}(request)
-
-	return request.Id
-}
-
-func (c *Coordinator) UserRequestStatus(requestId shared.Id) UserStatusResponse {
-	c.rwmu.RLock()
-	defer c.rwmu.RUnlock()
-
-	userRequest := c.UserRequests[requestId]
-
-	return UserStatusResponse{
-		Status: userRequest.Status,
-		Result: userRequest.Result,
-	}
-}
-
-func (c *Coordinator) TaskLaunch(worker *Worker, task *shared.WorkerTask) (bool, error) {
+func (c *Coordinator) taskLaunch(worker *Worker, task *shared.WorkerTask) (bool, error) {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(task); err != nil {
 		return false, err
 	}
 
-	// Send the HTTP POST request
 	resp, err := http.Post(
-		"http://"+worker.Address+"/internal/api/worker/crack?id=%"+string(task.Id),
+		"http://"+worker.Address+"/internal/api/worker/crack?id="+strconv.FormatUint(uint64(task.Id), 10),
 		"application/json",
 		&buf)
 	if err != nil {
@@ -213,15 +314,71 @@ func (c *Coordinator) TaskLaunch(worker *Worker, task *shared.WorkerTask) (bool,
 		return false, nil
 	}
 
+	c.rwmu.Lock()
+	task.WorkerId = worker.Id
 	c.WorkersTasks[task.Id] = task
+	c.UserRequestsToTasks[task.RequestId] = append(c.UserRequestsToTasks[task.RequestId], task)
+	c.rwmu.Unlock()
 
 	return true, nil
 }
 
-func (c *Coordinator) TaskStatus() {
+func (c *Coordinator) taskStatus(task *shared.WorkerTask) shared.TaskStatus {
+	c.rwmu.RLock()
+	worker := c.Workers[task.WorkerId]
+	c.rwmu.RUnlock()
 
+	resp, err := http.Get("http://" + worker.Address + "/internal/api/worker/crack?id=" + strconv.FormatUint(uint64(task.Id), 10))
+	if err != nil {
+		return shared.UNKNOWN
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return shared.UNKNOWN
+	}
+
+	var statusResponse shared.TaskStatusResponse
+
+	if err := json.NewDecoder(resp.Body).Decode(&statusResponse); err != nil {
+		return shared.UNKNOWN
+	}
+
+	c.rwmu.Lock()
+	task.Status = statusResponse.Status
+	c.rwmu.Unlock()
+
+	return task.Status
 }
 
-func (c *Coordinator) TaskKill() {
+func (c *Coordinator) taskKill(task *shared.WorkerTask) error {
+	c.rwmu.RLock()
+	worker, exists := c.Workers[task.WorkerId]
+	c.rwmu.RUnlock()
+	if !exists {
+		return fmt.Errorf("worker with ID %d not found", task.WorkerId)
+	}
 
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(task); err != nil {
+		return err
+	}
+
+	resp, err := http.Post(
+		"http://"+worker.Address+"/internal/api/worker/crack?id="+strconv.FormatUint(uint64(task.Id), 10),
+		"application/json",
+		&buf)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	c.rwmu.Lock()
+	task.Status = shared.KILLED
+	c.rwmu.Unlock()
+
+	return nil
 }

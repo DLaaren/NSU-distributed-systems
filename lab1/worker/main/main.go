@@ -24,7 +24,7 @@ type ServerContext struct {
 	Port               string `yaml:"port"`
 	CoordinatorAddress string `yaml:"coordinator_address"`
 	WorkerStatus       coordinator.WorkerStatus
-	Tasks              map[shared.Id]*shared.WorkerTask
+	Tasks              map[shared.TaskId]*shared.WorkerTask
 
 	rwmu sync.RWMutex
 }
@@ -56,7 +56,7 @@ func submitTaskHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var task shared.WorkerTask
-	task.Id = shared.Id(value)
+	task.Id = shared.TaskId(value)
 	if err := json.NewDecoder(r.Body).Decode(&task); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
@@ -186,7 +186,7 @@ func main() {
 	log.Println("configs were parsed sucessfully")
 
 	context.WorkerStatus = coordinator.IDLE
-	context.Tasks = make(map[shared.Id]*shared.WorkerTask, 0)
+	context.Tasks = make(map[shared.TaskId]*shared.WorkerTask, 0)
 
 	http.HandleFunc("/internal/api/worker/status", getWorkerStatusHandler)
 	http.HandleFunc("/internal/api/worker/crack", submitTaskHandler)
