@@ -21,3 +21,5 @@ func (m *MockCoordinator) GetUserRequestStatus(id shared.UserRequestId) coordina
 func (m *MockCoordinator) RegisterWorker(worker *coordinator.Worker) {}
 
 func (m *MockCoordinator) CheckWorkers() {}
+
+func (m *MockCoordinator) UpdateTask(task *shared.WorkerTask) {}

@@ -22,6 +22,7 @@ type CoordinatorI interface {
 	Crack(request *UserRequest) shared.UserRequestId
 	RegisterWorker(worker *Worker)
 	CheckWorkers()
+	UpdateTask(task *shared.WorkerTask)
 }
 
 type Coordinator struct {
@@ -120,9 +121,10 @@ func (c *Coordinator) assignTasks(request UserRequest) {
 		Status:    shared.IN_PROGRESS,
 	}
 
-	c.rwmu.RLock()
+	c.rwmu.Lock()
 	numWorkers := len(c.Workers)
-	c.rwmu.RUnlock()
+	c.UserRequests[request.Id].TasksScheduled = numWorkers
+	c.rwmu.Unlock()
 
 	crack_len := request.MaxLength
 	chunks := splitRange(strings.Repeat("a", int(crack_len)), strings.Repeat("z", int(crack_len)), numWorkers)
@@ -195,6 +197,8 @@ func (c *Coordinator) deleteRequestAndTasks(request UserRequest) {
 func (c *Coordinator) Crack(request *UserRequest) shared.UserRequestId {
 	request.Id = shared.UserRequestId(uuid.New().ID())
 	request.Status = PROCESSING
+	request.TasksDone = 0
+	request.TasksScheduled = 0
 
 	c.rwmu.Lock()
 	c.UserRequests[request.Id] = request
@@ -260,11 +264,11 @@ func (c *Coordinator) CheckWorkers() {
 			response, err := http.Get("http://" + w.Address + "/internal/api/worker/heartbeat")
 
 			if err != nil || response.StatusCode != http.StatusOK {
-				if w.Status == DEAD && time.Since(w.LastHB) >= deadDelay {
+				if w.Status == shared.DEAD && time.Since(w.LastHB) >= deadDelay {
 					c.DeleteWorker(w)
 				} else {
 					c.rwmu.Lock()
-					w.Status = DEAD
+					w.Status = shared.DEAD
 					c.rwmu.Unlock()
 				}
 			} else if /* err == nil && */ response.StatusCode == http.StatusOK {
@@ -278,17 +282,17 @@ func (c *Coordinator) CheckWorkers() {
 }
 
 /* Get worker status */
-func (c *Coordinator) getWorkerStatus(address string) WorkerStatus {
+func (c *Coordinator) getWorkerStatus(address string) shared.WorkerStatus {
 	resp, err := http.Get("http://" + address + "/internal/api/worker/status")
 	if err != nil || resp.StatusCode != http.StatusOK {
-		return DEAD
+		return shared.DEAD
 	}
 	defer resp.Body.Close()
 
-	var statusResponse WorkerStatusResponse
+	var statusResponse shared.WorkerStatusResponse
 
 	if err := json.NewDecoder(resp.Body).Decode(&statusResponse); err != nil {
-		return DEAD
+		return shared.DEAD
 	}
 
 	return statusResponse.Status
@@ -381,4 +385,25 @@ func (c *Coordinator) taskKill(task *shared.WorkerTask) error {
 	c.rwmu.Unlock()
 
 	return nil
+}
+
+func (c *Coordinator) UpdateTask(task *shared.WorkerTask) {
+	c.rwmu.Lock()
+	c.WorkersTasks[task.Id] = task
+	c.UserRequests[task.RequestId].TasksDone += 1
+	c.rwmu.Unlock()
+
+	c.rwmu.RLock()
+	request := c.UserRequests[task.RequestId]
+	c.rwmu.RUnlock()
+	if request.TasksDone == request.TasksScheduled {
+		c.rwmu.Lock()
+		request.Status = READY
+		for _, task := range c.UserRequestsToTasks[request.Id] {
+			if task.Result != "" {
+				request.Result = task.Result
+			}
+		}
+		c.rwmu.Unlock()
+	}
 }

@@ -46,7 +46,7 @@ func main() {
 	http.HandleFunc("/api/hash/status", coordinator.GetRequestStatusHandler(context.Coordinator))
 	http.HandleFunc("/api/hash/crack", coordinator.SubmitRequestCrackHandler(context.Coordinator))
 	http.HandleFunc("/internal/api/worker/register", coordinator.RegisterNewWorkerHandler(context.Coordinator))
-	// http.HandleFunc("/internal/api/task/result", coordinator.GetTaskResultHandler(context.Coordinator))
+	http.HandleFunc("/internal/api/task/result", coordinator.GetTaskResultHandler(context.Coordinator))
 
 	log.Println("all handlers were set up")
 

@@ -62,7 +62,7 @@ func RegisterNewWorkerHandler(coordinator CoordinatorI) http.HandlerFunc {
 		}
 
 		var worker Worker
-		var workerStatus WorkerStatusResponse
+		var workerStatus shared.WorkerStatusResponse
 		err := json.NewDecoder(r.Body).Decode(&workerStatus)
 		if err != nil {
 			http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
@@ -83,21 +83,26 @@ func RegisterNewWorkerHandler(coordinator CoordinatorI) http.HandlerFunc {
 
 func GetTaskResultHandler(coordinator CoordinatorI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// queryParams := r.URL.Query()
+		queryParams := r.URL.Query()
 
-		// taskId := queryParams.Get("taskId")
-		// if taskId == "" {
-		// 	http.Error(w, "missing requestId parameter", http.StatusBadRequest)
-		// 	return
-		// }
+		taskIdStr := queryParams.Get("taskId")
+		if taskIdStr == "" {
+			http.Error(w, "missing requestId parameter", http.StatusBadRequest)
+			return
+		}
 
-		// value, err := strconv.ParseUint(taskId, 10, 32)
-		// if err != nil {
-		// 	log.Fatal(err)
-		// }
+		taskId, err := strconv.ParseUint(taskIdStr, 10, 32)
+		if err != nil {
+			log.Fatal(err)
+		}
 
-		// c.rwmu.RLock()
-		// c.UserRequests[value]
-		// c.rwmu.RUnlock()
+		var task shared.WorkerTask
+		if err := json.NewDecoder(r.Body).Decode(&task); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		task.Id = shared.TaskId(taskId)
+		coordinator.UpdateTask(&task)
 	}
 }

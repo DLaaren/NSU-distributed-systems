@@ -1,13 +1,15 @@
 package shared
 
+import "context"
+
 type TaskStatus string
 
 const (
 	IN_PROGRESS  TaskStatus = "IN_PROGRESS"
-	DONE_SUCCESS            = "DONE_SUCCESS"
-	DONE_FAILURE            = "DONE_FAILURE"
-	KILLED                  = "KILLED"
-	UNKNOWN                 = "UNKNOWN"
+	DONE_SUCCESS TaskStatus = "DONE_SUCCESS"
+	DONE_FAILURE TaskStatus = "DONE_FAILURE"
+	KILLED       TaskStatus = "KILLED"
+	UNKNOWN      TaskStatus = "UNKNOWN"
 )
 
 type WorkerTask struct {
@@ -19,8 +21,14 @@ type WorkerTask struct {
 	MaxLength  uint32     `json:"maxLength"`
 	Status     TaskStatus `json:"status"`
 	Result     string     `json:"result"`
+	CancelFunc context.CancelFunc
 }
 
 type TaskStatusResponse struct {
 	Status TaskStatus `json:"status"`
+}
+
+type TaskResultResponse struct {
+	Status TaskStatus `json:"status"`
+	Result string     `json:"result"`
 }
