@@ -29,9 +29,9 @@ func GetWorkerStatusHandler(worker *WorkerContext) http.HandlerFunc {
 	}
 }
 
-func registerTask(worker *WorkerContext, task shared.WorkerTask) {
+func RegisterTask(worker *WorkerContext, task *shared.WorkerTask) {
 	worker.rwmu.Lock()
-	worker.Tasks[task.Id] = &task
+	worker.Tasks[task.Id] = task
 	worker.rwmu.Unlock()
 }
 
@@ -59,16 +59,21 @@ func SubmitTaskHandler(worker *WorkerContext, coordinatorAddress string) http.Ha
 
 		ctx, cancel := context.WithCancel(context.Background())
 		task.CancelFunc = cancel
-		registerTask(worker, task)
+		RegisterTask(worker, &task)
 
 		go func() {
+			defer cancel()
 			select {
 			case <-ctx.Done():
 				worker.rwmu.Lock()
 				task.Status = shared.KILLED
 				task.Result = ""
 				worker.rwmu.Unlock()
+
+				SendTaskResultToCoordinator(task, coordinatorAddress)
+
 				return
+
 			default:
 				start, end, err := func(inputRange string) (string, string, error) {
 					parts := strings.Split(inputRange, "-")
@@ -95,28 +100,43 @@ func SubmitTaskHandler(worker *WorkerContext, coordinatorAddress string) http.Ha
 					return string(runes)
 				}
 
-				for input := start; strings.Compare(end, input) >= 0; incrementString(input) {
+				for input := start; strings.Compare(end, input) >= 0; input = incrementString(input) {
 					computedHash := md5.Sum([]byte(input))
+					log.Println("input = "+input+"; computed hash = ", computedHash)
 					if hex.EncodeToString(computedHash[:]) == task.Hash {
 						worker.rwmu.Lock()
 						task.Status = shared.DONE_SUCCESS
 						task.Result = input
 						worker.rwmu.Unlock()
+
+						SendTaskResultToCoordinator(task, coordinatorAddress)
+						return
 					}
 				}
 
 				worker.rwmu.Lock()
-				task.Status = shared.DONE_FAILURE
+				task.Status = shared.KILLED
 				task.Result = ""
 				worker.rwmu.Unlock()
 
-				sendAnswer(task, coordinatorAddress)
+				SendTaskResultToCoordinator(task, coordinatorAddress)
 			}
 		}()
+
+		/* Wait for the context to be done (timeout or cancellation) */
+		<-ctx.Done()
+		if ctx.Err() == context.DeadlineExceeded {
+			worker.rwmu.Lock()
+			task.Status = shared.KILLED
+			task.Result = ""
+			worker.rwmu.Unlock()
+
+			SendTaskResultToCoordinator(task, coordinatorAddress)
+		}
 	}
 }
 
-func sendAnswer(task shared.WorkerTask, coordinatorAddress string) {
+func SendTaskResultToCoordinator(task shared.WorkerTask, coordinatorAddress string) {
 	response := shared.TaskResultResponse{
 		Status: task.Status,
 		Result: task.Result,
@@ -170,7 +190,6 @@ func KillTaskHandler(worker *WorkerContext) http.HandlerFunc {
 
 		task.CancelFunc()
 
-		// Respond to the client
 		w.WriteHeader(http.StatusOK)
 	}
 }

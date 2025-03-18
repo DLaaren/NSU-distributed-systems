@@ -12,13 +12,13 @@ const (
 )
 
 type UserRequest struct {
-	Id             shared.UserRequestId
-	Hash           string `json:"hash"`
-	MaxLength      uint32 `json:"maxLength"`
-	Status         UserRequestStatus
-	Result         string
-	TasksDone      int
-	TasksScheduled int
+	Id             shared.UserRequestId `json:"-"`
+	Hash           string               `json:"hash"`
+	MaxLength      uint32               `json:"maxLength"`
+	Status         UserRequestStatus    `json:"-"`
+	Result         string               `json:"-"`
+	TasksDone      int                  `json:"-"`
+	TasksScheduled int                  `json:"-"`
 }
 
 type UserResponse struct {

@@ -6,7 +6,7 @@ import (
 )
 
 type Worker struct {
-	Id      shared.WorkerId
+	Id      shared.WorkerId     `json:"-"`
 	Address string              `json:"address"`
 	Status  shared.WorkerStatus `json:"status"`
 	LastHB  time.Time           `json:"lastHb"`

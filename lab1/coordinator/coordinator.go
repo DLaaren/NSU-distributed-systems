@@ -70,7 +70,7 @@ func (c *Coordinator) GetUserRequestStatus(requestId shared.UserRequestId) UserS
 	}
 
 	log.SetPrefix("[Coordintor]: ")
-	log.Println("GetUserRequestStatus(" + strconv.FormatUint(uint64(requestId), 10) + ") called; Status =" + string(response.Status) + "Result =" + response.Result)
+	log.Println("GetUserRequestStatus(" + strconv.FormatUint(uint64(requestId), 10) + ") called; Status = " + string(response.Status) + "; Result = " + response.Result)
 	log.SetPrefix("[Server]: ")
 
 	return response
@@ -155,7 +155,7 @@ func (c *Coordinator) assignTasks(request UserRequest) {
 			default:
 				worker := getNextWorker(c, &numWorkers, i+retry)
 
-				res, err := c.taskLaunch(worker, &task)
+				res, err := c.TaskLaunch(worker, &task)
 				if !res || err != nil {
 					retry++
 					goto retrytaskLaunch
@@ -185,7 +185,7 @@ func (c *Coordinator) deleteRequestAndTasks(request UserRequest) {
 
 	c.rwmu.RLock()
 	for _, task := range c.UserRequestsToTasks[request.Id] {
-		err := c.taskKill(task)
+		err := c.TaskKill(task)
 		if err != nil {
 			task.Status = shared.UNKNOWN
 		}
@@ -207,7 +207,7 @@ func (c *Coordinator) Crack(request *UserRequest) shared.UserRequestId {
 	go c.assignTasks(*request)
 
 	log.SetPrefix("[Coordintor]: ")
-	log.Println("successfully assigned tasks for user request with id =" + strconv.FormatUint(uint64(request.Id), 10))
+	log.Println("successfully assigned tasks for user request with id = " + strconv.FormatUint(uint64(request.Id), 10))
 	log.SetPrefix("[Server]: ")
 
 	return request.Id
@@ -228,7 +228,7 @@ func (c *Coordinator) RegisterWorker(worker *Worker) {
 	c.AddressesToWorkers[worker.Address] = worker
 
 	log.SetPrefix("[Coordintor]: ")
-	log.Println("registered worker with id =" + strconv.FormatUint(uint64(worker.Id), 10) + "and address =" + worker.Address)
+	log.Println("registered worker with id = " + strconv.FormatUint(uint64(worker.Id), 10) + " and address = " + worker.Address)
 	log.SetPrefix("[Server]: ")
 }
 
@@ -240,7 +240,7 @@ func (c *Coordinator) DeleteWorker(worker *Worker) {
 	delete(c.AddressesToWorkers, worker.Address)
 
 	log.SetPrefix("[Coordintor]: ")
-	log.Println("deleted worker with id =" + strconv.FormatUint(uint64(worker.Id), 10) + "and address =" + worker.Address)
+	log.Println("deleted worker with id = " + strconv.FormatUint(uint64(worker.Id), 10) + " and address = " + worker.Address)
 	log.SetPrefix("[Server]: ")
 }
 
@@ -271,7 +271,7 @@ func (c *Coordinator) CheckWorkers() {
 					w.Status = shared.DEAD
 					c.rwmu.Unlock()
 				}
-			} else if /* err == nil && */ response.StatusCode == http.StatusOK {
+			} else if err == nil && response.StatusCode == http.StatusOK {
 				c.rwmu.Lock()
 				w.LastHB = time.Now()
 				w.Status = c.getWorkerStatus(w.Address)
@@ -298,7 +298,7 @@ func (c *Coordinator) getWorkerStatus(address string) shared.WorkerStatus {
 	return statusResponse.Status
 }
 
-func (c *Coordinator) taskLaunch(worker *Worker, task *shared.WorkerTask) (bool, error) {
+func (c *Coordinator) TaskLaunch(worker *Worker, task *shared.WorkerTask) (bool, error) {
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(task); err != nil {
 		return false, err
@@ -324,10 +324,14 @@ func (c *Coordinator) taskLaunch(worker *Worker, task *shared.WorkerTask) (bool,
 	c.UserRequestsToTasks[task.RequestId] = append(c.UserRequestsToTasks[task.RequestId], task)
 	c.rwmu.Unlock()
 
+	log.SetPrefix("[Coordintor]: ")
+	log.Println("successfully assigned tasks with id = " + strconv.FormatUint(uint64(task.Id), 10) + " to worker with address = " + worker.Address)
+	log.SetPrefix("[Server]: ")
+
 	return true, nil
 }
 
-func (c *Coordinator) taskStatus(task *shared.WorkerTask) shared.TaskStatus {
+func (c *Coordinator) TaskStatus(task *shared.WorkerTask) shared.TaskStatus {
 	c.rwmu.RLock()
 	worker := c.Workers[task.WorkerId]
 	c.rwmu.RUnlock()
@@ -351,10 +355,14 @@ func (c *Coordinator) taskStatus(task *shared.WorkerTask) shared.TaskStatus {
 	task.Status = statusResponse.Status
 	c.rwmu.Unlock()
 
+	log.SetPrefix("[Coordintor]: ")
+	log.Println("status of task with id = " + strconv.FormatUint(uint64(task.Id), 10) + " is " + string(task.Status))
+	log.SetPrefix("[Server]: ")
+
 	return task.Status
 }
 
-func (c *Coordinator) taskKill(task *shared.WorkerTask) error {
+func (c *Coordinator) TaskKill(task *shared.WorkerTask) error {
 	c.rwmu.RLock()
 	worker, exists := c.Workers[task.WorkerId]
 	c.rwmu.RUnlock()
@@ -389,19 +397,21 @@ func (c *Coordinator) taskKill(task *shared.WorkerTask) error {
 
 func (c *Coordinator) UpdateTask(task *shared.WorkerTask) {
 	c.rwmu.Lock()
+	request, found := c.UserRequests[task.RequestId]
+	if !found {
+		return
+	}
+
 	c.WorkersTasks[task.Id] = task
-	c.UserRequests[task.RequestId].TasksDone += 1
+	request.TasksDone += 1
 	c.rwmu.Unlock()
 
-	c.rwmu.RLock()
-	request := c.UserRequests[task.RequestId]
-	c.rwmu.RUnlock()
 	if request.TasksDone == request.TasksScheduled {
 		c.rwmu.Lock()
 		request.Status = READY
-		for _, task := range c.UserRequestsToTasks[request.Id] {
-			if task.Result != "" {
-				request.Result = task.Result
+		for _, t := range c.UserRequestsToTasks[request.Id] {
+			if t.Result != "" {
+				request.Result = t.Result
 			}
 		}
 		c.rwmu.Unlock()

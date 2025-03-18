@@ -13,15 +13,15 @@ const (
 )
 
 type WorkerTask struct {
-	Id         TaskId
-	RequestId  UserRequestId
-	WorkerId   WorkerId
-	Hash       string     `json:"hash"`
-	InputRange string     `json:"inputRange"` // like "aaa-ddd"
-	MaxLength  uint32     `json:"maxLength"`
-	Status     TaskStatus `json:"status"`
-	Result     string     `json:"result"`
-	CancelFunc context.CancelFunc
+	Id         TaskId             `json:"id"`
+	RequestId  UserRequestId      `json:"requestId"`
+	WorkerId   WorkerId           `json:"-"`
+	Hash       string             `json:"hash"`
+	InputRange string             `json:"inputRange"` // like "aaa-ddd"
+	MaxLength  uint32             `json:"maxLength"`
+	Status     TaskStatus         `json:"status"`
+	Result     string             `json:"result"`
+	CancelFunc context.CancelFunc `json:"-"`
 }
 
 type TaskStatusResponse struct {

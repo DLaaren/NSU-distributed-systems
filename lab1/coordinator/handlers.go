@@ -10,7 +10,7 @@ import (
 	"lab1/shared"
 )
 
-func GetRequestStatusHandler(coordinator CoordinatorI) http.HandlerFunc {
+func GetRequestStatusHandler(coord CoordinatorI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		queryParams := r.URL.Query()
 
@@ -26,7 +26,7 @@ func GetRequestStatusHandler(coordinator CoordinatorI) http.HandlerFunc {
 			return
 		}
 
-		response := coordinator.GetUserRequestStatus(shared.UserRequestId(value))
+		response := coord.GetUserRequestStatus(shared.UserRequestId(value))
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -34,7 +34,7 @@ func GetRequestStatusHandler(coordinator CoordinatorI) http.HandlerFunc {
 	}
 }
 
-func SubmitRequestCrackHandler(coordinator CoordinatorI) http.HandlerFunc {
+func SubmitRequestCrackHandler(coord CoordinatorI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var userRequest UserRequest
 		if err := json.NewDecoder(r.Body).Decode(&userRequest); err != nil {
@@ -42,7 +42,7 @@ func SubmitRequestCrackHandler(coordinator CoordinatorI) http.HandlerFunc {
 			return
 		}
 
-		requestId := coordinator.Crack(&userRequest)
+		requestId := coord.Crack(&userRequest)
 
 		response := UserResponse{
 			RequestId: requestId,
@@ -54,7 +54,7 @@ func SubmitRequestCrackHandler(coordinator CoordinatorI) http.HandlerFunc {
 	}
 }
 
-func RegisterNewWorkerHandler(coordinator CoordinatorI) http.HandlerFunc {
+func RegisterNewWorkerHandler(coord CoordinatorI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
@@ -72,7 +72,7 @@ func RegisterNewWorkerHandler(coordinator CoordinatorI) http.HandlerFunc {
 		worker.Address = r.RemoteAddr
 		worker.LastHB = time.Now()
 		worker.Status = workerStatus.Status
-		coordinator.RegisterWorker(&worker)
+		coord.RegisterWorker(&worker)
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Worker registered successfully"))
@@ -81,7 +81,7 @@ func RegisterNewWorkerHandler(coordinator CoordinatorI) http.HandlerFunc {
 	}
 }
 
-func GetTaskResultHandler(coordinator CoordinatorI) http.HandlerFunc {
+func GetTaskResultHandler(coord CoordinatorI) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		queryParams := r.URL.Query()
 
@@ -103,6 +103,6 @@ func GetTaskResultHandler(coordinator CoordinatorI) http.HandlerFunc {
 		}
 
 		task.Id = shared.TaskId(taskId)
-		coordinator.UpdateTask(&task)
+		coord.UpdateTask(&task)
 	}
 }
