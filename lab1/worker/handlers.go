@@ -39,13 +39,13 @@ func SubmitTaskHandler(worker *WorkerContext, coordinatorAddress string) http.Ha
 	return func(w http.ResponseWriter, r *http.Request) {
 		queryParams := r.URL.Query()
 
-		requestId := queryParams.Get("requestId")
-		if requestId == "" {
-			http.Error(w, "missing requestId parameter", http.StatusBadRequest)
+		taskId := queryParams.Get("taskId")
+		if taskId == "" {
+			http.Error(w, "missing taskId parameter", http.StatusBadRequest)
 			return
 		}
 
-		value, err := strconv.ParseUint(requestId, 10, 32)
+		value, err := strconv.ParseUint(taskId, 10, 32)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -115,7 +115,7 @@ func SubmitTaskHandler(worker *WorkerContext, coordinatorAddress string) http.Ha
 				}
 
 				worker.rwmu.Lock()
-				task.Status = shared.KILLED
+				task.Status = shared.DONE_FAILURE
 				task.Result = ""
 				worker.rwmu.Unlock()
 
@@ -166,7 +166,7 @@ func KillTaskHandler(worker *WorkerContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		queryParams := r.URL.Query()
 
-		taskIdStr := queryParams.Get("requestId")
+		taskIdStr := queryParams.Get("taskId")
 		if taskIdStr == "" {
 			http.Error(w, "missing requestId parameter", http.StatusBadRequest)
 			return

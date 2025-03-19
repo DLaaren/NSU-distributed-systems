@@ -37,6 +37,7 @@ func parse_configs() error {
 }
 
 func register_worker() error {
+	// to config
 	retryDelay := 5 * time.Second
 	maxRetries := 2
 
@@ -51,7 +52,7 @@ func register_worker() error {
 
 		resp, err := http.Post(
 			"http://"+context.CoordinatorAddress+"/api/worker/register",
-			"aplication/json",
+			"application/json",
 			&buf)
 		if err != nil {
 			return err

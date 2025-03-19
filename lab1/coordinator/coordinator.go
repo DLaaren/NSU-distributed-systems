@@ -120,6 +120,7 @@ func (c *Coordinator) assignTasks(request UserRequest) {
 		MaxLength: request.MaxLength,
 		Status:    shared.IN_PROGRESS,
 	}
+	// rlock?
 
 	c.rwmu.Lock()
 	numWorkers := len(c.Workers)
@@ -139,6 +140,7 @@ func (c *Coordinator) assignTasks(request UserRequest) {
 		return worker
 	}
 
+	// to config
 	retry := 0
 	timeout := 1 * time.Minute
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -175,6 +177,7 @@ func (c *Coordinator) assignTasks(request UserRequest) {
 	}
 }
 
+// timeout -> delete
 func (c *Coordinator) deleteRequestAndTasks(request UserRequest) {
 	c.rwmu.Lock()
 	c.UserRequests[request.Id].Status = TIMEOUT_ERROR
@@ -248,6 +251,7 @@ func (c *Coordinator) DeleteWorker(worker *Worker) {
  * If worker is DEAD for a long time then delete it
  */
 func (c *Coordinator) CheckWorkers() {
+	// to  config
 	heartbeatDelay := 5 * time.Second
 	ticker := time.NewTicker(heartbeatDelay)
 	deadDelay := 1 * time.Minute
@@ -406,6 +410,7 @@ func (c *Coordinator) UpdateTask(task *shared.WorkerTask) {
 	request.TasksDone += 1
 	c.rwmu.Unlock()
 
+	// next with database
 	if request.TasksDone == request.TasksScheduled {
 		c.rwmu.Lock()
 		request.Status = READY

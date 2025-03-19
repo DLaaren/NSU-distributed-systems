@@ -134,6 +134,7 @@ func TestRegisterTask(t *testing.T) {
 	assert.NotNil(t, workerCtx.Tasks[task.Id])
 }
 
+// check taskId sending
 func TestTaskExecution(t *testing.T) {
 	workerCtx := &worker.WorkerContext{
 		Status: shared.IDLE,
@@ -161,7 +162,7 @@ func TestTaskExecution(t *testing.T) {
 		t.Fatal(err)
 
 	}
-	req := httptest.NewRequest("POST", "/task?requestId=1", &buf)
+	req := httptest.NewRequest("POST", "/task?taskId=1", &buf)
 	w := httptest.NewRecorder()
 	handler(w, req)
 
