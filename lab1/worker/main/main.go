@@ -41,17 +41,17 @@ func register_worker() error {
 	retryDelay := 5 * time.Second
 	maxRetries := 2
 
-	requestBody := context.Worker.Status
-
 	var buf bytes.Buffer
+	var worker shared.WorkerStatusResponse
+	worker.Status = context.Worker.Status
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if err := json.NewEncoder(&buf).Encode(requestBody); err != nil {
+		if err := json.NewEncoder(&buf).Encode(worker); err != nil {
 			return err
 		}
 
 		resp, err := http.Post(
-			"http://"+context.CoordinatorAddress+"/api/worker/register",
+			"http://"+context.CoordinatorAddress+"/internal/api/worker/register",
 			"application/json",
 			&buf)
 		if err != nil {
@@ -84,8 +84,10 @@ func main() {
 	}
 	log.Println("configs were parsed sucessfully")
 
-	context.Worker.Status = shared.IDLE
-	context.Worker.Tasks = make(map[shared.TaskId]*shared.WorkerTask, 0)
+	context.Worker = &worker.WorkerContext{
+		Status: shared.IDLE,
+		Tasks: make(map[shared.TaskId]*shared.WorkerTask, 0),
+	}
 
 	http.HandleFunc("/internal/api/worker/status", worker.GetWorkerStatusHandler(context.Worker))
 	http.HandleFunc("/internal/api/worker/crack", worker.SubmitTaskHandler(context.Worker, context.CoordinatorAddress))
