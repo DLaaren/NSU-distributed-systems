@@ -1,4 +1,4 @@
-package user_request
+package prequest
 
 import "lab2/shared"
 

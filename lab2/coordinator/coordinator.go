@@ -1,4 +1,4 @@
-package coordinator
+package pcoordinator
 
 import (
 	"bytes"
@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"lab2/database"
+	"lab2/request"
 	"lab2/shared"
 	"lab2/task"
-	"lab2/user_request"
 	"lab2/worker"
 )
 
@@ -37,7 +37,7 @@ func NewCoordinator(db *sql.DB) *Coordinator {
 	}
 }
 
-func (c *Coordinator) GetUserRequestStatus(requestId shared.UserRequestId) user_request.UserStatusResponse {
+func (c *Coordinator) GetUserRequestStatus(requestId shared.UserRequestId) prequest.UserStatusResponse {
 	oldPrefix := log.Prefix()
 	log.SetPrefix("[Coordinator]: ")
 	defer log.SetPrefix(oldPrefix)
@@ -46,15 +46,15 @@ func (c *Coordinator) GetUserRequestStatus(requestId shared.UserRequestId) user_
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			log.Printf("Request ID %d not found\n", requestId)
-			return user_request.UserStatusResponse{
-				Status: user_request.ERROR,
+			return prequest.UserStatusResponse{
+				Status: prequest.ERROR,
 				Result: []string{""},
 			}
 		}
 
 		log.Printf("Error getting status for request ID %d: %v\n", requestId, err)
-		return user_request.UserStatusResponse{
-			Status: user_request.ERROR,
+		return prequest.UserStatusResponse{
+			Status: prequest.ERROR,
 			Result: []string{""},
 		}
 	}
@@ -103,32 +103,32 @@ func splitRange(start, end string, numWorkers int) []string {
 	return chunks
 }
 
-func (c *Coordinator) setRequestError(request *user_request.UserRequest) {
+func (c *Coordinator) setRequestError(request *prequest.UserRequest) {
 	tasks, _ := database.GetTasksByRequestId(c.db, request.Id)
 	for _, task := range tasks {
 		worker, _ := database.GetWorkerById(c.db, task.WorkerId)
 		c.taskKill(worker, &task)
 	}
-	database.UpdateTaskStatusAndResultByRequestId(c.db, request.Id, task.KILLED, []string{""})
-	database.UpdateRequestStatusAndResult(c.db, request.Id, user_request.ERROR, []string{""})
+	database.UpdateTaskStatusAndResultByRequestId(c.db, request.Id, ptask.KILLED, []string{""})
+	database.UpdateRequestStatusAndResult(c.db, request.Id, prequest.ERROR, []string{""})
 }
 
-func (c *Coordinator) setRequestTimeout(request *user_request.UserRequest) {
+func (c *Coordinator) setRequestTimeout(request *prequest.UserRequest) {
 	tasks, _ := database.GetTasksByRequestId(c.db, request.Id)
 	for _, task := range tasks {
 		worker, _ := database.GetWorkerById(c.db, task.WorkerId)
 		c.taskKill(worker, &task)
 	}
-	database.UpdateTaskStatusAndResultByRequestId(c.db, request.Id, task.KILLED, []string{""})
-	database.UpdateRequestStatusAndResult(c.db, request.Id, user_request.TIMEOUT_ERROR, []string{""})
+	database.UpdateTaskStatusAndResultByRequestId(c.db, request.Id, ptask.KILLED, []string{""})
+	database.UpdateRequestStatusAndResult(c.db, request.Id, prequest.TIMEOUT_ERROR, []string{""})
 }
 
-func (c *Coordinator) assignTasks(request *user_request.UserRequest) {
-	task := task.Task{
+func (c *Coordinator) assignTasks(request *prequest.UserRequest) {
+	task := ptask.Task{
 		RequestId: request.Id,
 		Hash:      request.Hash,
 		MaxLength: request.MaxLength,
-		Status:    task.IN_PROGRESS,
+		Status:    ptask.IN_PROGRESS,
 	}
 
 	workers, err := database.GetAllWorkers(c.db)
@@ -142,7 +142,7 @@ func (c *Coordinator) assignTasks(request *user_request.UserRequest) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.TaskTimeout)
 	defer cancel()
 
-	go func(c *Coordinator, request *user_request.UserRequest, task *task.Task) {
+	go func(c *Coordinator, request *prequest.UserRequest, task *ptask.Task) {
 		retry := 0
 		for i, chunk := range chunks {
 			task.InputRange = chunk
@@ -177,13 +177,13 @@ func (c *Coordinator) assignTasks(request *user_request.UserRequest) {
 		c.setRequestTimeout(request)
 
 		log.SetPrefix("[Coordinator]: ")
-		log.Println("timeout while trying to assign tasks for user request with id = %d\n", request.Id)
+		log.Printf("timeout while trying to assign tasks for user request with id = %d\n", request.Id)
 		log.SetPrefix("[Server]: ")
 	}
 }
 
 /* Creates task and map it to workers */
-func (c *Coordinator) Crack(request *user_request.UserRequest) (shared.UserRequestId, error) {
+func (c *Coordinator) Crack(request *prequest.UserRequest) (shared.UserRequestId, error) {
 	oldPrefix := log.Prefix()
 	log.SetPrefix("[Coordinator]: ")
 	defer log.SetPrefix(oldPrefix)
@@ -202,7 +202,7 @@ func (c *Coordinator) Crack(request *user_request.UserRequest) (shared.UserReque
 }
 
 /* Register worker */
-func (c *Coordinator) RegisterWorker(worker *worker.Worker) error {
+func (c *Coordinator) RegisterWorker(worker *pworker.Worker) error {
 	oldPrefix := log.Prefix()
 	log.SetPrefix("[Coordinator]: ")
 	defer log.SetPrefix(oldPrefix)
@@ -215,7 +215,7 @@ func (c *Coordinator) RegisterWorker(worker *worker.Worker) error {
 	var id shared.WorkerId
 	if worker == nil { /* Such worker isn't found then register this new one */
 		id, err = database.AddWorker(c.db, worker)
-	} else if worker != nil { /* This worker is existing then update it */
+	} else { /* This worker is existing then update it */
 		err = database.UpdateWorker(c.db, worker)
 	}
 
@@ -224,7 +224,7 @@ func (c *Coordinator) RegisterWorker(worker *worker.Worker) error {
 	return err
 }
 
-func (c *Coordinator) UpdateWorkerStatus(worker *worker.Worker) error {
+func (c *Coordinator) UpdateWorkerStatus(worker *pworker.Worker) error {
 	oldPrefix := log.Prefix()
 	log.SetPrefix("[Coordinator]: ")
 	defer log.SetPrefix(oldPrefix)
@@ -236,7 +236,7 @@ func (c *Coordinator) UpdateWorkerStatus(worker *worker.Worker) error {
 	return err
 }
 
-func (c *Coordinator) UpdateWorkerStatusAndLastHB(worker *worker.Worker, time time.Time) error {
+func (c *Coordinator) UpdateWorkerStatusAndLastHB(worker *pworker.Worker, time time.Time) error {
 	oldPrefix := log.Prefix()
 	log.SetPrefix("[Coordinator]: ")
 	defer log.SetPrefix(oldPrefix)
@@ -249,7 +249,7 @@ func (c *Coordinator) UpdateWorkerStatusAndLastHB(worker *worker.Worker, time ti
 	return err
 }
 
-func (c *Coordinator) DeleteWorker(worker *worker.Worker) error {
+func (c *Coordinator) DeleteWorker(worker *pworker.Worker) error {
 	oldPrefix := log.Prefix()
 	log.SetPrefix("[Coordinator]: ")
 	defer log.SetPrefix(oldPrefix)
@@ -277,7 +277,7 @@ func (c *Coordinator) CheckWorkers() {
 			go func() {
 				c.sendHB(worker)
 
-				if worker.Status == shared.DEAD && time.Since(worker.LastHB) >= c.DeadDelay {
+				if worker.Status == pworker.DEAD && time.Since(worker.LastHB) >= c.DeadDelay {
 					err = c.DeleteWorker(worker)
 				} else {
 					err = c.UpdateWorkerStatusAndLastHB(worker, time.Now())
@@ -290,18 +290,18 @@ func (c *Coordinator) CheckWorkers() {
 	}
 }
 
-func (c *Coordinator) sendHB(worker *worker.Worker) {
+func (c *Coordinator) sendHB(worker *pworker.Worker) {
 	resp, err := http.Get("http://" + worker.Address + "/internal/api/worker/status")
 	if err != nil || resp.StatusCode != http.StatusOK {
-		worker.Status = shared.DEAD
+		worker.Status = pworker.DEAD
 		return
 	}
 	defer resp.Body.Close()
 
-	var statusResponse shared.WorkerStatusResponse
+	var statusResponse pworker.WorkerStatusResponse
 
 	if err := json.NewDecoder(resp.Body).Decode(&statusResponse); err != nil {
-		worker.Status = shared.DEAD
+		worker.Status = pworker.DEAD
 		return
 	}
 
@@ -309,7 +309,7 @@ func (c *Coordinator) sendHB(worker *worker.Worker) {
 	worker.LastHB = time.Now()
 }
 
-func (c *Coordinator) UpdateTask(task *task.Task) error {
+func (c *Coordinator) UpdateTask(task *ptask.Task) error {
 	database.UpdateTaskStatusAndResult(c.db, task)
 
 	// check if all tasks are done
@@ -337,10 +337,8 @@ func (c *Coordinator) finalizeUserRequest(requestId shared.UserRequestId) error 
 	var requestResult []string
 
 	for _, result := range results {
-		if result.Status == task.DONE_SUCCESS {
-			for _, r := range result.Result {
-				requestResult = append(requestResult, r)
-			}
+		if result.Status == ptask.DONE_SUCCESS {
+			requestResult = append(requestResult, result.Result...)
 		}
 	}
 
@@ -348,7 +346,7 @@ func (c *Coordinator) finalizeUserRequest(requestId shared.UserRequestId) error 
 		requestResult = append(requestResult, "")
 	}
 
-	err = database.UpdateRequestStatusAndResult(c.db, requestId, user_request.READY, requestResult)
+	err = database.UpdateRequestStatusAndResult(c.db, requestId, prequest.READY, requestResult)
 	if err != nil {
 		return err
 	}
@@ -356,7 +354,7 @@ func (c *Coordinator) finalizeUserRequest(requestId shared.UserRequestId) error 
 	return nil
 }
 
-func (c *Coordinator) taskLaunch(worker *worker.Worker, task *task.Task) (bool, error) {
+func (c *Coordinator) taskLaunch(worker *pworker.Worker, task *ptask.Task) (bool, error) {
 	oldPrefix := log.Prefix()
 	log.SetPrefix("[Coordinator]: ")
 	defer log.SetPrefix(oldPrefix)
@@ -384,7 +382,7 @@ func (c *Coordinator) taskLaunch(worker *worker.Worker, task *task.Task) (bool, 
 	return true, nil
 }
 
-func (c *Coordinator) taskKill(worker *worker.Worker, task *task.Task) {
+func (c *Coordinator) taskKill(worker *pworker.Worker, task *ptask.Task) {
 	oldPrefix := log.Prefix()
 	log.SetPrefix("[Coordinator]: ")
 	defer log.SetPrefix(oldPrefix)

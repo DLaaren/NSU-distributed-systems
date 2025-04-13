@@ -19,7 +19,7 @@ func CreateTableForWorkers(db *sql.DB) error {
 	return err
 }
 
-func AddWorker(db *sql.DB, worker *worker.Worker) (shared.WorkerId, error) {
+func AddWorker(db *sql.DB, worker *pworker.Worker) (shared.WorkerId, error) {
 	var id shared.WorkerId
 
 	err := db.QueryRow(
@@ -32,8 +32,8 @@ func AddWorker(db *sql.DB, worker *worker.Worker) (shared.WorkerId, error) {
 	return id, err
 }
 
-func GetWorkerById(db *sql.DB, id shared.WorkerId) (*worker.Worker, error) {
-	var worker worker.Worker
+func GetWorkerById(db *sql.DB, id shared.WorkerId) (*pworker.Worker, error) {
+	var worker pworker.Worker
 
 	err := db.QueryRow(
 		`SELECT * 
@@ -48,8 +48,8 @@ func GetWorkerById(db *sql.DB, id shared.WorkerId) (*worker.Worker, error) {
 	return &worker, err
 }
 
-func GetWorkerByAddress(db *sql.DB, address string) (*worker.Worker, error) {
-	var worker worker.Worker
+func GetWorkerByAddress(db *sql.DB, address string) (*pworker.Worker, error) {
+	var worker pworker.Worker
 
 	err := db.QueryRow(
 		`SELECT * 
@@ -64,7 +64,7 @@ func GetWorkerByAddress(db *sql.DB, address string) (*worker.Worker, error) {
 	return &worker, err
 }
 
-func GetAllWorkers(db *sql.DB) ([]*worker.Worker, error) {
+func GetAllWorkers(db *sql.DB) ([]*pworker.Worker, error) {
 	rows, err := db.Query(`
 		SELECT *
 		FROM workers
@@ -74,9 +74,9 @@ func GetAllWorkers(db *sql.DB) ([]*worker.Worker, error) {
 		return nil, err
 	}
 
-	var workers []*worker.Worker
+	var workers []*pworker.Worker
 	for rows.Next() {
-		var worker worker.Worker
+		var worker pworker.Worker
 		err = rows.Scan(
 			&worker.Id,
 			&worker.Address,
@@ -97,7 +97,7 @@ func GetAllWorkers(db *sql.DB) ([]*worker.Worker, error) {
 	return workers, err
 }
 
-func UpdateWorker(db *sql.DB, worker *worker.Worker) error {
+func UpdateWorker(db *sql.DB, worker *pworker.Worker) error {
 	err := db.QueryRow(
 		`UPDATE workers
 		SET
@@ -111,19 +111,19 @@ func UpdateWorker(db *sql.DB, worker *worker.Worker) error {
 	return err
 }
 
-func UpdateWorkerStatus(db *sql.DB, worker *worker.Worker) error {
+func UpdateWorkerStatus(db *sql.DB, worker *pworker.Worker) error {
 	err := db.QueryRow(
 		`UPDATE workers
 		SET
 			status = $1, 
 		WHERE id = $2`,
-		shared.DEAD, worker.Id).
+		pworker.DEAD, worker.Id).
 		Err()
 
 	return err
 }
 
-func DeleteWorker(db *sql.DB, worker *worker.Worker) error {
+func DeleteWorker(db *sql.DB, worker *pworker.Worker) error {
 	err := db.QueryRow(
 		`DELETE FROM workers
 		WHERE id = $1`,

@@ -21,8 +21,8 @@ type ServerContext struct {
 	CoordinatorAddress string        `yaml:"coordinator_address"`
 	RetryConnectDelay  time.Duration `yaml:"retry_connect_delay"`
 	MaxRetries         int           `yaml:"max_retries"`
-	Status             worker.WorkerStatus
-	Tasks              []task.Task
+	Status             pworker.WorkerStatus
+	Tasks              []ptask.Task
 	RWmutex            sync.RWMutex
 }
 
@@ -83,9 +83,9 @@ func main() {
 	}
 	log.Println("configs were parsed sucessfully")
 
-	http.HandleFunc("/internal/api/worker/status", worker.GetWorkerStatusHandler(&server_context))
-	http.HandleFunc("/internal/api/worker/crack", worker.SubmitTaskHandler(&server_context))
-	http.HandleFunc("/internal/api/worker/kill", worker.KillTaskHandler(&server_context))
+	http.HandleFunc("/internal/api/worker/status", GetWorkerStatusHandler(&server_context))
+	http.HandleFunc("/internal/api/worker/crack", SubmitTaskHandler(&server_context))
+	http.HandleFunc("/internal/api/worker/kill", KillTaskHandler(&server_context))
 	http.HandleFunc("/internal/api/worker/heartbeat", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("alive"))
@@ -94,7 +94,7 @@ func main() {
 	log.Println("all handlers were set up")
 
 	server_context.RWmutex.Lock()
-	server_context.Status = worker.IDLE
+	server_context.Status = pworker.IDLE
 	server_context.RWmutex.Unlock()
 	//check if we died and then awaken and there is some tasks -> context.Status = CRACKING
 

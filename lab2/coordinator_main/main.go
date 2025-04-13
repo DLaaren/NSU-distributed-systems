@@ -13,7 +13,7 @@ import (
 
 type ServerContext struct {
 	Port        string `yaml:"port"`
-	Coordinator *coordinator.Coordinator
+	Coordinator *pcoordinator.Coordinator
 	DbConnStr   string `yaml:"db_conn_str"`
 }
 
@@ -47,7 +47,7 @@ func main() {
 
 	}
 
-	context.Coordinator = coordinator.NewCoordinator(db)
+	context.Coordinator = pcoordinator.NewCoordinator(db)
 
 	/* define handlers */
 	http.HandleFunc("/api/hash/status", GetRequestStatusHandler(context.Coordinator))

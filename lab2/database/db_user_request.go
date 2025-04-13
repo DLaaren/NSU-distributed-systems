@@ -3,8 +3,8 @@ package database
 import (
 	"database/sql"
 
+	"lab2/request"
 	"lab2/shared"
-	"lab2/user_request"
 )
 
 func CreateTableForUserRequests(db *sql.DB) error {
@@ -21,21 +21,21 @@ func CreateTableForUserRequests(db *sql.DB) error {
 	return err
 }
 
-func AddUserRequest(db *sql.DB, userRequest *user_request.UserRequest) (shared.UserRequestId, error) {
+func AddUserRequest(db *sql.DB, userRequest *prequest.UserRequest) (shared.UserRequestId, error) {
 	var id shared.UserRequestId
 
 	err := db.QueryRow(
 		`INSERT INTO user_requests (hash, max_length, status)
 		"VALUES ($1, $2, $3)
 		RETURNING id`,
-		userRequest.Hash, userRequest.MaxLength, user_request.PROCESSING).
+		userRequest.Hash, userRequest.MaxLength, prequest.PROCESSING).
 		Scan(&id)
 
 	return id, err
 }
 
-func GetUserRequestById(db *sql.DB, id shared.UserRequestId) (*user_request.UserRequest, error) {
-	var userRequest user_request.UserRequest
+func GetUserRequestById(db *sql.DB, id shared.UserRequestId) (*prequest.UserRequest, error) {
+	var userRequest prequest.UserRequest
 
 	err := db.QueryRow(
 		`SELECT * 
@@ -51,8 +51,8 @@ func GetUserRequestById(db *sql.DB, id shared.UserRequestId) (*user_request.User
 	return &userRequest, err
 }
 
-func GetUserRequestStatusById(db *sql.DB, id shared.UserRequestId) (user_request.UserStatusResponse, error) {
-	var userStatusResponse user_request.UserStatusResponse
+func GetUserRequestStatusById(db *sql.DB, id shared.UserRequestId) (prequest.UserStatusResponse, error) {
+	var userStatusResponse prequest.UserStatusResponse
 
 	err := db.QueryRow(
 		`SELECT status, result
@@ -64,7 +64,7 @@ func GetUserRequestStatusById(db *sql.DB, id shared.UserRequestId) (user_request
 	return userStatusResponse, err
 }
 
-func UpdateRequestStatusAndResult(db *sql.DB, id shared.UserRequestId, status user_request.UserRequestStatus, result []string) error {
+func UpdateRequestStatusAndResult(db *sql.DB, id shared.UserRequestId, status prequest.UserRequestStatus, result []string) error {
 	err := db.QueryRow(
 		`UPDATE user_requests
 		SET

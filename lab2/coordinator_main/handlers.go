@@ -8,13 +8,13 @@ import (
 	"time"
 
 	"lab2/coordinator"
+	"lab2/request"
 	"lab2/shared"
 	"lab2/task"
-	"lab2/user_request"
 	"lab2/worker"
 )
 
-func GetRequestStatusHandler(coord *coordinator.Coordinator) http.HandlerFunc {
+func GetRequestStatusHandler(coord *pcoordinator.Coordinator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		queryParams := r.URL.Query()
 
@@ -38,9 +38,9 @@ func GetRequestStatusHandler(coord *coordinator.Coordinator) http.HandlerFunc {
 	}
 }
 
-func SubmitRequestCrackHandler(coord *coordinator.Coordinator) http.HandlerFunc {
+func SubmitRequestCrackHandler(coord *pcoordinator.Coordinator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var userRequest user_request.UserRequest
+		var userRequest prequest.UserRequest
 		if err := json.NewDecoder(r.Body).Decode(&userRequest); err != nil {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
@@ -57,7 +57,7 @@ func SubmitRequestCrackHandler(coord *coordinator.Coordinator) http.HandlerFunc 
 			return
 		}
 
-		response := user_request.UserResponse{
+		response := prequest.UserResponse{
 			RequestId: requestId,
 		}
 
@@ -67,15 +67,15 @@ func SubmitRequestCrackHandler(coord *coordinator.Coordinator) http.HandlerFunc 
 	}
 }
 
-func RegisterNewWorkerHandler(coord *coordinator.Coordinator) http.HandlerFunc {
+func RegisterNewWorkerHandler(coord *pcoordinator.Coordinator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
 			return
 		}
 
-		var worker worker.Worker
-		var workerStatus shared.WorkerStatusResponse
+		var worker pworker.Worker
+		var workerStatus pworker.WorkerStatusResponse
 		err := json.NewDecoder(r.Body).Decode(&workerStatus)
 		if err != nil {
 			http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
@@ -94,9 +94,9 @@ func RegisterNewWorkerHandler(coord *coordinator.Coordinator) http.HandlerFunc {
 	}
 }
 
-func GetTaskResultHandler(coord *coordinator.Coordinator) http.HandlerFunc {
+func GetTaskResultHandler(coord *pcoordinator.Coordinator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var task task.Task
+		var task ptask.Task
 		if err := json.NewDecoder(r.Body).Decode(&task); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return

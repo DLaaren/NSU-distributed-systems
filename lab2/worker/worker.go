@@ -1,11 +1,9 @@
-package worker
+package pworker
 
 import (
-	"sync"
 	"time"
 
 	"lab2/shared"
-	"lab2/task"
 )
 
 type WorkerStatus string
@@ -27,15 +25,8 @@ type WorkerI interface {
 
 /* This struct is used only for coordinator-side */
 type Worker struct {
-	Id      shared.WorkerId     `json:"-"`
-	Address string              `json:"address"`
-	Status  shared.WorkerStatus `json:"status"`
-	LastHB  time.Time           `json:"-"`
-}
-
-type WorkerContext struct {
-	Status shared.WorkerStatus
-	Tasks  map[shared.TaskId]*task.Task
-
-	rwmu sync.RWMutex
+	Id      shared.WorkerId `json:"-"`
+	Address string          `json:"address"`
+	Status  WorkerStatus    `json:"status"`
+	LastHB  time.Time       `json:"-"`
 }

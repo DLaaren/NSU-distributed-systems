@@ -20,7 +20,7 @@ import (
 func GetWorkerStatusHandler(sc *ServerContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sc.RWmutex.RLock()
-		response := worker.WorkerStatusResponse{
+		response := pworker.WorkerStatusResponse{
 			Status: sc.Status,
 		}
 		sc.RWmutex.RUnlock()
@@ -46,7 +46,7 @@ func SubmitTaskHandler(sc *ServerContext) http.HandlerFunc {
 			log.Fatal(err)
 		}
 
-		var task task.Task
+		var task ptask.Task
 		task.Id = shared.TaskId(value)
 		if err := json.NewDecoder(r.Body).Decode(&task); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -60,12 +60,12 @@ func SubmitTaskHandler(sc *ServerContext) http.HandlerFunc {
 		sc.Tasks = append(sc.Tasks, task)
 		sc.RWmutex.Unlock()
 
-		go func(sc *ServerContext, task *task.Task) {
+		go func(sc *ServerContext, task *ptask.Task) {
 			defer cancel()
 			select {
 			case <-ctx.Done():
 				sc.RWmutex.RLock()
-				task.Status = task.KILLED
+				task.Status = ptask.KILLED
 				task.Result = []string{""}
 				sc.RWmutex.RUnlock()
 
@@ -104,8 +104,8 @@ func SubmitTaskHandler(sc *ServerContext) http.HandlerFunc {
 					log.Println("input = "+input+"; computed hash = ", computedHash)
 					if hex.EncodeToString(computedHash[:]) == task.Hash {
 						sc.RWmutex.RLock()
-						task.Status = task.DONE_SUCCESS
-						task.Result = input
+						task.Status = ptask.DONE_SUCCESS
+						task.Result = append(task.Result, input)
 						sc.RWmutex.RUnlock()
 
 						SendTaskResultToCoordinator(task, sc.CoordinatorAddress)
@@ -114,8 +114,8 @@ func SubmitTaskHandler(sc *ServerContext) http.HandlerFunc {
 				}
 
 				sc.RWmutex.RLock()
-				task.Status = task.DONE_FAILURE
-				task.Result = ""
+				task.Status = ptask.DONE_FAILURE
+				task.Result = []string{""}
 				sc.RWmutex.RUnlock()
 
 				SendTaskResultToCoordinator(task, sc.CoordinatorAddress)
@@ -126,7 +126,7 @@ func SubmitTaskHandler(sc *ServerContext) http.HandlerFunc {
 		<-ctx.Done()
 		if ctx.Err() == context.DeadlineExceeded {
 			sc.RWmutex.RLock()
-			task.Status = task.KILLED
+			task.Status = ptask.KILLED
 			task.Result = []string{""}
 			sc.RWmutex.RUnlock()
 
@@ -135,8 +135,8 @@ func SubmitTaskHandler(sc *ServerContext) http.HandlerFunc {
 	}
 }
 
-func SendTaskResultToCoordinator(task *task.Task, coordinatorAddress string) {
-	response := task.TaskResultResponse{
+func SendTaskResultToCoordinator(task *ptask.Task, coordinatorAddress string) {
+	response := ptask.TaskResultResponse{
 		Status: task.Status,
 		Result: task.Result,
 	}
@@ -176,12 +176,11 @@ func KillTaskHandler(sc *ServerContext) http.HandlerFunc {
 			log.Fatal(err)
 		}
 
-		var task *task.Task
-		task.Id = shared.TaskId(taskId)
+		var task *ptask.Task
 
 		sc.RWmutex.RLock()
 		for _, t := range sc.Tasks {
-			if t.Id == task.Id {
+			if t.Id == shared.TaskId(taskId) {
 				task = &t
 			}
 		}

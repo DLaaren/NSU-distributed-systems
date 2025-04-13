@@ -25,20 +25,20 @@ func CreateTableForTasks(db *sql.DB) error {
 	return err
 }
 
-func AddTask(db *sql.DB, task *task.Task) error {
+func AddTask(db *sql.DB, task *ptask.Task) error {
 	var id shared.TaskId
 
 	err := db.QueryRow(
 		`INSERT INTO tasks (input_range, max_length, status, user_request_id, worker_id)
 		"VALUES ($1, $2, $3, $4, $5)
 		RETURNING id`,
-		task.InputRange, task.MaxLength, task.IN_PROGRESS, task.RequestId, task.WorkerId).
+		task.InputRange, task.MaxLength, ptask.IN_PROGRESS, task.RequestId, task.WorkerId).
 		Scan(&id)
 
 	return err
 }
 
-func GetTasksByRequestId(db *sql.DB, requestId shared.UserRequestId) ([]task.Task, error) {
+func GetTasksByRequestId(db *sql.DB, requestId shared.UserRequestId) ([]ptask.Task, error) {
 	rows, err := db.Query(`
 		SELECT status, result
 		FROM tasks
@@ -50,9 +50,9 @@ func GetTasksByRequestId(db *sql.DB, requestId shared.UserRequestId) ([]task.Tas
 
 	defer rows.Close()
 
-	var tasks []task.Task
+	var tasks []ptask.Task
 	for rows.Next() {
-		var task task.Task
+		var task ptask.Task
 		err = rows.Scan(
 			&task.Id,
 			&task.InputRange,
@@ -70,7 +70,7 @@ func GetTasksByRequestId(db *sql.DB, requestId shared.UserRequestId) ([]task.Tas
 	return tasks, rows.Err()
 }
 
-func GetTaskResultsByRequestId(db *sql.DB, requestId shared.UserRequestId) ([]task.TaskResultResponse, error) {
+func GetTaskResultsByRequestId(db *sql.DB, requestId shared.UserRequestId) ([]ptask.TaskResultResponse, error) {
 	rows, err := db.Query(`
 		SELECT status, result
 		FROM tasks
@@ -82,22 +82,22 @@ func GetTaskResultsByRequestId(db *sql.DB, requestId shared.UserRequestId) ([]ta
 
 	defer rows.Close()
 
-	var results []task.TaskResultResponse
+	var results []ptask.TaskResultResponse
 	for rows.Next() {
-		var status task.TaskStatus
+		var status ptask.TaskStatus
 		var result []string
 
 		err = rows.Scan(&status, &result)
 		if err != nil {
 			return nil, err
 		}
-		results = append(results, task.TaskResultResponse{Status: status, Result: result})
+		results = append(results, ptask.TaskResultResponse{Status: status, Result: result})
 	}
 
 	return results, rows.Err()
 }
 
-func UpdateTaskStatusAndResult(db *sql.DB, task *task.Task) error {
+func UpdateTaskStatusAndResult(db *sql.DB, task *ptask.Task) error {
 	err := db.QueryRow(
 		`UPDATE tasks
 		SET
@@ -110,7 +110,7 @@ func UpdateTaskStatusAndResult(db *sql.DB, task *task.Task) error {
 	return err
 }
 
-func UpdateTaskStatusAndResultByRequestId(db *sql.DB, requestId shared.UserRequestId, status task.TaskStatus, result []string) error {
+func UpdateTaskStatusAndResultByRequestId(db *sql.DB, requestId shared.UserRequestId, status ptask.TaskStatus, result []string) error {
 	err := db.QueryRow(
 		`UPDATE tasks
 		SET
