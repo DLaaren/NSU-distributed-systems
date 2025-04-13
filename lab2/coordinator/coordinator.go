@@ -1,0 +1,411 @@
+package coordinator
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"lab2/database"
+	"lab2/shared"
+	"lab2/task"
+	"lab2/user_request"
+	"lab2/worker"
+)
+
+type Coordinator struct {
+	db             *sql.DB
+	HeartbeatDelay time.Duration
+	DeadDelay      time.Duration
+	TaskTimeout    time.Duration
+	TaskRetry      int
+}
+
+/* Init Coordinator instance */
+func NewCoordinator(db *sql.DB) *Coordinator {
+	log.Println("Coordinator was created")
+
+	return &Coordinator{
+		db: db,
+	}
+}
+
+func (c *Coordinator) GetUserRequestStatus(requestId shared.UserRequestId) user_request.UserStatusResponse {
+	oldPrefix := log.Prefix()
+	log.SetPrefix("[Coordinator]: ")
+	defer log.SetPrefix(oldPrefix)
+
+	statusResponse, err := database.GetUserRequestStatusById(c.db, requestId)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			log.Printf("Request ID %d not found\n", requestId)
+			return user_request.UserStatusResponse{
+				Status: user_request.ERROR,
+				Result: []string{""},
+			}
+		}
+
+		log.Printf("Error getting status for request ID %d: %v\n", requestId, err)
+		return user_request.UserStatusResponse{
+			Status: user_request.ERROR,
+			Result: []string{""},
+		}
+	}
+
+	log.Printf("GetUserRequestStatus(%d) called: Status = %s; Result = %s\n",
+		requestId,
+		statusResponse.Status,
+		statusResponse.Result)
+	return statusResponse
+}
+
+/* Trearing each string as a base-26 number */
+func stringToInt(s string) int32 {
+	var result int32
+	for _, r := range s {
+		result = result*26 + int32(r-'a')
+	}
+	return result
+}
+
+func intToString(n int32, length int) string {
+	var result string
+	for i := 0; i < length; i++ {
+		result = string('a'+n%26) + result
+		n /= 26
+	}
+	return result
+}
+
+func splitRange(start, end string, numWorkers int) []string {
+	startVal := stringToInt(start)
+	endVal := stringToInt(end)
+	chunkSize := (endVal - startVal) / int32(numWorkers)
+
+	var chunks []string
+	for i := 0; i < numWorkers; i++ {
+		chunkStart := intToString(startVal+int32(i)*chunkSize, len(start))
+		chunkEnd := intToString(startVal+int32(i+1)*chunkSize-1, len(start))
+		if i == numWorkers-1 {
+			/* Ensure the last chunk includes the end value */
+			chunkEnd = end
+		}
+		chunks = append(chunks, fmt.Sprintf("%s-%s", chunkStart, chunkEnd))
+	}
+
+	return chunks
+}
+
+func (c *Coordinator) setRequestError(request *user_request.UserRequest) {
+	tasks, _ := database.GetTasksByRequestId(c.db, request.Id)
+	for _, task := range tasks {
+		worker, _ := database.GetWorkerById(c.db, task.WorkerId)
+		c.taskKill(worker, &task)
+	}
+	database.UpdateTaskStatusAndResultByRequestId(c.db, request.Id, task.KILLED, []string{""})
+	database.UpdateRequestStatusAndResult(c.db, request.Id, user_request.ERROR, []string{""})
+}
+
+func (c *Coordinator) setRequestTimeout(request *user_request.UserRequest) {
+	tasks, _ := database.GetTasksByRequestId(c.db, request.Id)
+	for _, task := range tasks {
+		worker, _ := database.GetWorkerById(c.db, task.WorkerId)
+		c.taskKill(worker, &task)
+	}
+	database.UpdateTaskStatusAndResultByRequestId(c.db, request.Id, task.KILLED, []string{""})
+	database.UpdateRequestStatusAndResult(c.db, request.Id, user_request.TIMEOUT_ERROR, []string{""})
+}
+
+func (c *Coordinator) assignTasks(request *user_request.UserRequest) {
+	task := task.Task{
+		RequestId: request.Id,
+		Hash:      request.Hash,
+		MaxLength: request.MaxLength,
+		Status:    task.IN_PROGRESS,
+	}
+
+	workers, err := database.GetAllWorkers(c.db)
+	if err != nil {
+		c.setRequestError(request)
+	}
+	numWorkers := len(workers)
+	crack_len := request.MaxLength
+	chunks := splitRange(strings.Repeat("a", int(crack_len)), strings.Repeat("z", int(crack_len)), numWorkers)
+
+	ctx, cancel := context.WithTimeout(context.Background(), c.TaskTimeout)
+	defer cancel()
+
+	go func(c *Coordinator, request *user_request.UserRequest, task *task.Task) {
+		retry := 0
+		for i, chunk := range chunks {
+			task.InputRange = chunk
+
+		retryTaskLaunch:
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				worker := workers[(i+retry)%numWorkers]
+
+				launched, err := c.taskLaunch(worker, task)
+				if !launched || err != nil {
+					if retry >= c.TaskRetry {
+						c.setRequestError(request)
+					}
+					retry++
+					goto retryTaskLaunch
+				}
+				task.WorkerId = worker.Id
+				err = database.AddTask(c.db, task)
+				if err != nil {
+					c.setRequestError(request)
+				}
+			}
+		}
+	}(c, request, &task)
+
+	/* Wait for the context to be done (timeout or cancellation) */
+	<-ctx.Done()
+	if ctx.Err() == context.DeadlineExceeded {
+		c.setRequestTimeout(request)
+
+		log.SetPrefix("[Coordinator]: ")
+		log.Println("timeout while trying to assign tasks for user request with id = %d\n", request.Id)
+		log.SetPrefix("[Server]: ")
+	}
+}
+
+/* Creates task and map it to workers */
+func (c *Coordinator) Crack(request *user_request.UserRequest) (shared.UserRequestId, error) {
+	oldPrefix := log.Prefix()
+	log.SetPrefix("[Coordinator]: ")
+	defer log.SetPrefix(oldPrefix)
+
+	id, err := database.AddUserRequest(c.db, request)
+	if err != nil {
+		return shared.UserRequestId(0), err
+	}
+	request.Id = id
+
+	go c.assignTasks(request)
+
+	log.Printf("Crack(user_request) called: UserRequestId = %d; Error = %v\n", id, err)
+
+	return request.Id, err
+}
+
+/* Register worker */
+func (c *Coordinator) RegisterWorker(worker *worker.Worker) error {
+	oldPrefix := log.Prefix()
+	log.SetPrefix("[Coordinator]: ")
+	defer log.SetPrefix(oldPrefix)
+
+	worker, err := database.GetWorkerByAddress(c.db, worker.Address)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	var id shared.WorkerId
+	if worker == nil { /* Such worker isn't found then register this new one */
+		id, err = database.AddWorker(c.db, worker)
+	} else if worker != nil { /* This worker is existing then update it */
+		err = database.UpdateWorker(c.db, worker)
+	}
+
+	log.Printf("RegisterWorker(worker) called: Id = %d; Address = %s Error = %v\n", id, worker.Address, err)
+
+	return err
+}
+
+func (c *Coordinator) UpdateWorkerStatus(worker *worker.Worker) error {
+	oldPrefix := log.Prefix()
+	log.SetPrefix("[Coordinator]: ")
+	defer log.SetPrefix(oldPrefix)
+
+	err := database.UpdateWorkerStatus(c.db, worker)
+
+	log.Printf("UpdateWorkerStatus(worker) called: Id = %d; Address = %s Error = %v\n", worker.Id, worker.Address, err)
+
+	return err
+}
+
+func (c *Coordinator) UpdateWorkerStatusAndLastHB(worker *worker.Worker, time time.Time) error {
+	oldPrefix := log.Prefix()
+	log.SetPrefix("[Coordinator]: ")
+	defer log.SetPrefix(oldPrefix)
+
+	worker.LastHB = time
+	err := database.UpdateWorker(c.db, worker)
+
+	log.Printf("UpdateWorkerStatusAndLastHB(worker, time) called: Id = %d; Address = %s Error = %v\n", worker.Id, worker.Address, err)
+
+	return err
+}
+
+func (c *Coordinator) DeleteWorker(worker *worker.Worker) error {
+	oldPrefix := log.Prefix()
+	log.SetPrefix("[Coordinator]: ")
+	defer log.SetPrefix(oldPrefix)
+
+	err := database.DeleteWorker(c.db, worker)
+
+	log.Printf("DeleteWorker(worker) called: Id = %d; Address = %s Error = %v\n", worker.Id, worker.Address, err)
+
+	return err
+}
+
+/* Send heartbeat to workers
+ * If worker is DEAD for a long time then delete it
+ */
+func (c *Coordinator) CheckWorkers() {
+	ticker := time.NewTicker(c.HeartbeatDelay)
+
+	for range ticker.C {
+		workers, err := database.GetAllWorkers(c.db)
+		if err != nil {
+			continue
+		}
+
+		for _, worker := range workers {
+			go func() {
+				c.sendHB(worker)
+
+				if worker.Status == shared.DEAD && time.Since(worker.LastHB) >= c.DeadDelay {
+					err = c.DeleteWorker(worker)
+				} else {
+					err = c.UpdateWorkerStatusAndLastHB(worker, time.Now())
+				}
+				if err != nil {
+					return
+				}
+			}()
+		}
+	}
+}
+
+func (c *Coordinator) sendHB(worker *worker.Worker) {
+	resp, err := http.Get("http://" + worker.Address + "/internal/api/worker/status")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		worker.Status = shared.DEAD
+		return
+	}
+	defer resp.Body.Close()
+
+	var statusResponse shared.WorkerStatusResponse
+
+	if err := json.NewDecoder(resp.Body).Decode(&statusResponse); err != nil {
+		worker.Status = shared.DEAD
+		return
+	}
+
+	worker.Status = statusResponse.Status
+	worker.LastHB = time.Now()
+}
+
+func (c *Coordinator) UpdateTask(task *task.Task) error {
+	database.UpdateTaskStatusAndResult(c.db, task)
+
+	// check if all tasks are done
+	complete, err := database.CountCompleteTasks(c.db, task.RequestId)
+	if err != nil {
+		return err
+	}
+
+	if complete {
+		err = c.finalizeUserRequest(task.RequestId)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *Coordinator) finalizeUserRequest(requestId shared.UserRequestId) error {
+	results, err := database.GetTaskResultsByRequestId(c.db, requestId)
+	if err != nil {
+		return err
+	}
+
+	var requestResult []string
+
+	for _, result := range results {
+		if result.Status == task.DONE_SUCCESS {
+			for _, r := range result.Result {
+				requestResult = append(requestResult, r)
+			}
+		}
+	}
+
+	if len(requestResult) == 0 {
+		requestResult = append(requestResult, "")
+	}
+
+	err = database.UpdateRequestStatusAndResult(c.db, requestId, user_request.READY, requestResult)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Coordinator) taskLaunch(worker *worker.Worker, task *task.Task) (bool, error) {
+	oldPrefix := log.Prefix()
+	log.SetPrefix("[Coordinator]: ")
+	defer log.SetPrefix(oldPrefix)
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(task); err != nil {
+		return false, err
+	}
+
+	resp, err := http.Post(
+		"http://"+worker.Address+"/internal/api/worker/crack?id="+strconv.FormatUint(uint64(task.Id), 10),
+		"application/json",
+		&buf)
+	if err != nil {
+		return false, err
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, nil
+	}
+	log.Printf("Successfully assigned task with id = %d from request with id = %d to worker with address = %s", task.Id, task.RequestId, worker.Address)
+
+	return true, nil
+}
+
+func (c *Coordinator) taskKill(worker *worker.Worker, task *task.Task) {
+	oldPrefix := log.Prefix()
+	log.SetPrefix("[Coordinator]: ")
+	defer log.SetPrefix(oldPrefix)
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(task); err != nil {
+		return
+	}
+
+	resp, err := http.Post(
+		"http://"+worker.Address+"/internal/api/worker/kill?id="+strconv.FormatUint(uint64(task.Id), 10),
+		"application/json",
+		&buf)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+
+	log.Printf("Successfully killed task with id = %d from request with id = %d to worker with address = %s", task.Id, task.RequestId, worker.Address)
+}
