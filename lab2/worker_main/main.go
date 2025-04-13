@@ -17,16 +17,24 @@ import (
 )
 
 type ServerContext struct {
-	Port               string        `yaml:"port"`
-	CoordinatorAddress string        `yaml:"coordinator_address"`
-	RetryConnectDelay  time.Duration `yaml:"retry_connect_delay"`
-	MaxRetries         int           `yaml:"max_retries"`
+	Port               string
+	CoordinatorAddress string
+	RetryConnectDelay  time.Duration
+	MaxRetries         int
 	Status             pworker.WorkerStatus
 	Tasks              []ptask.Task
 	RWmutex            sync.RWMutex
 }
 
+type Config struct {
+	Port               string        `yaml:"port"`
+	CoordinatorAddress string        `yaml:"coordinator_address"`
+	RetryConnectDelay  time.Duration `yaml:"retry_connect_delay"`
+	MaxRetries         int           `yaml:"max_retries"`
+}
+
 var server_context ServerContext
+var config Config
 
 func parse_configs() error {
 	file, err := os.ReadFile("config.yaml")
@@ -34,7 +42,7 @@ func parse_configs() error {
 		return err
 	}
 
-	if err := yaml.Unmarshal(file, &server_context); err != nil {
+	if err := yaml.Unmarshal(file, &config); err != nil {
 		return err
 	}
 
@@ -82,6 +90,11 @@ func main() {
 		return
 	}
 	log.Println("configs were parsed sucessfully")
+
+	server_context.Port = config.Port
+	server_context.CoordinatorAddress = config.CoordinatorAddress
+	server_context.RetryConnectDelay = config.RetryConnectDelay
+	server_context.MaxRetries = config.MaxRetries
 
 	http.HandleFunc("/internal/api/worker/status", GetWorkerStatusHandler(&server_context))
 	http.HandleFunc("/internal/api/worker/crack", SubmitTaskHandler(&server_context))

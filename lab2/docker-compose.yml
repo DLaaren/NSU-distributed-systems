@@ -1,6 +1,22 @@
 services:
-  database:
-    
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: coordinator_user
+      POSTGRES_PASSWORD: coordinator_password
+      POSTGRES_DB: coordinator_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coordinator_user -d coordinator_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   coordinator:
     build:

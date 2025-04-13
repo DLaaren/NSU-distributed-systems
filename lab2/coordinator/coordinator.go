@@ -25,7 +25,7 @@ type Coordinator struct {
 	HeartbeatDelay time.Duration
 	DeadDelay      time.Duration
 	TaskTimeout    time.Duration
-	TaskRetry      int
+	TaskRetries    int
 }
 
 /* Init Coordinator instance */
@@ -156,7 +156,7 @@ func (c *Coordinator) assignTasks(request *prequest.UserRequest) {
 
 				launched, err := c.taskLaunch(worker, task)
 				if !launched || err != nil {
-					if retry >= c.TaskRetry {
+					if retry >= c.TaskRetries {
 						c.setRequestError(request)
 					}
 					retry++

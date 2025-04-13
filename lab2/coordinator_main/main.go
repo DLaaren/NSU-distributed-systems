@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -12,12 +13,22 @@ import (
 )
 
 type ServerContext struct {
-	Port        string `yaml:"port"`
+	Port        string
 	Coordinator *pcoordinator.Coordinator
-	DbConnStr   string `yaml:"db_conn_str"`
+	DbConnStr   string
+}
+
+type Config struct {
+	Port           string        `yaml:"port"`
+	DbConnStr      string        `yaml:"db_conn_str"`
+	HeartbeatDelay time.Duration `yaml:"heartbeat_delay"`
+	DeadDelay      time.Duration `yaml:"dead_delay"`
+	TaskTimeout    time.Duration `yaml:"task_timeout"`
+	TaskRetries    int           `yaml:"task_retries"`
 }
 
 var context ServerContext
+var config Config
 
 func parse_configs() error {
 	file, err := os.ReadFile("config.yaml")
@@ -25,7 +36,7 @@ func parse_configs() error {
 		return err
 	}
 
-	if err := yaml.Unmarshal(file, &context); err != nil {
+	if err := yaml.Unmarshal(file, &config); err != nil {
 		return err
 	}
 
@@ -42,12 +53,19 @@ func main() {
 	}
 	log.Println("configs were parsed sucessfully")
 
+	context.DbConnStr = config.DbConnStr
+	context.Port = config.Port
+
 	db, err := database.Initdb(context.DbConnStr)
 	if err != nil {
-
+		return
 	}
 
 	context.Coordinator = pcoordinator.NewCoordinator(db)
+	context.Coordinator.HeartbeatDelay = config.HeartbeatDelay
+	context.Coordinator.DeadDelay = config.DeadDelay
+	context.Coordinator.TaskTimeout = config.TaskTimeout
+	context.Coordinator.TaskRetries = config.TaskRetries
 
 	/* define handlers */
 	http.HandleFunc("/api/hash/status", GetRequestStatusHandler(context.Coordinator))

@@ -7,12 +7,21 @@ import (
 func Initdb(connStr string) (*sql.DB, error) {
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
-		return db, err
+		return nil, err
 	}
 
-	CreateTableForUserRequests(db)
-	CreateTableForWorkers(db)
-	CreateTableForTasks(db)
+	err = CreateTableForUserRequests(db)
+	if err != nil {
+		return nil, err
+	}
+	err = CreateTableForWorkers(db)
+	if err != nil {
+		return nil, err
+	}
+	err = CreateTableForTasks(db)
+	if err != nil {
+		return nil, err
+	}
 
 	return db, err
 }
