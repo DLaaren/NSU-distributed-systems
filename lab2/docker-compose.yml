@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: coordinator_password
       POSTGRES_DB: coordinator_db
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     networks:
@@ -21,9 +21,17 @@ services:
   coordinator:
     build:
       context: .
-      dockerfile: coordinator/Dockerfile
+      dockerfile: coordinator_main/Dockerfile
     container_name: coordinator
-    restart: unless-stopped
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: coordinator_user
+      DB_PASSWORD: coordinator_password
+      DB_NAME: coordinator_db
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8080:8080"
     networks:
@@ -32,7 +40,7 @@ services:
   worker:
     build:
       context: .
-      dockerfile: worker/Dockerfile
+      dockerfile: worker_main/Dockerfile
     environment:
       - COORDINATOR_ADDRESS=http://coordinator:8080
     depends_on:
@@ -44,3 +52,6 @@ services:
 networks:
   app-network:
     driver: bridge
+
+volumes:
+  pgdata:

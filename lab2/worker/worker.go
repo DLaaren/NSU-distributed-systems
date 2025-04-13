@@ -9,13 +9,12 @@ import (
 type WorkerStatus string
 
 const (
-	IDLE     WorkerStatus = "IDLE"
-	CRACKING WorkerStatus = "CRACKING"
-	DONE     WorkerStatus = "DONE"
-	DEAD     WorkerStatus = "DEAD"
+	ALIVE WorkerStatus = "ALIVE"
+	DEAD  WorkerStatus = "DEAD"
 )
 
 type WorkerStatusResponse struct {
+	Port   string       `json:"port"`
 	Status WorkerStatus `json:"status"`
 }
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	_ "github.com/lib/pq"
 	"gopkg.in/yaml.v3"
 
 	"lab2/coordinator"
@@ -44,7 +45,7 @@ func parse_configs() error {
 }
 
 func main() {
-	log.SetPrefix("[Server]: ")
+	log.SetPrefix("[Coordinator]: ")
 
 	/* parse configs */
 	if err := parse_configs(); err != nil {
@@ -58,6 +59,7 @@ func main() {
 
 	db, err := database.Initdb(context.DbConnStr)
 	if err != nil {
+		log.Printf("cannot connect to database: %s\n", err)
 		return
 	}
 

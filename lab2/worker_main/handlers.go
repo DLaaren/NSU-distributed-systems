@@ -22,6 +22,7 @@ func GetWorkerStatusHandler(sc *ServerContext) http.HandlerFunc {
 		sc.RWmutex.RLock()
 		response := pworker.WorkerStatusResponse{
 			Status: sc.Status,
+			Port:   sc.Port,
 		}
 		sc.RWmutex.RUnlock()
 
@@ -101,7 +102,7 @@ func SubmitTaskHandler(sc *ServerContext) http.HandlerFunc {
 
 				for input := start; strings.Compare(end, input) >= 0; input = incrementString(input) {
 					computedHash := md5.Sum([]byte(input))
-					log.Println("input = "+input+"; computed hash = ", computedHash)
+					// log.Println("input = "+input+"; computed hash = ", computedHash)
 					if hex.EncodeToString(computedHash[:]) == task.Hash {
 						sc.RWmutex.RLock()
 						task.Status = ptask.DONE_SUCCESS

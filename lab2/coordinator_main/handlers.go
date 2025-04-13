@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"lab2/coordinator"
@@ -82,15 +83,13 @@ func RegisterNewWorkerHandler(coord *pcoordinator.Coordinator) http.HandlerFunc 
 			return
 		}
 
-		worker.Address = r.RemoteAddr
+		worker.Address = strings.Split(r.RemoteAddr, ":")[0] + ":" + workerStatus.Port
 		worker.LastHB = time.Now()
 		worker.Status = workerStatus.Status
 		coord.RegisterWorker(&worker)
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Worker registered successfully"))
-
-		log.Println("new worker with address", worker.Address, "was registered")
 	}
 }
 

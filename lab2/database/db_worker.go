@@ -9,7 +9,7 @@ import (
 func CreateTableForWorkers(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS workers (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id SERIAL PRIMARY KEY,
 			address TEXT NOT NULL,
 			status TEXT NOT NULL,
 			last_hb TIMESTAMP NOT NULL
@@ -68,7 +68,6 @@ func GetAllWorkers(db *sql.DB) ([]*pworker.Worker, error) {
 	rows, err := db.Query(`
 		SELECT *
 		FROM workers
-		ORDER BY id ASC
 	`)
 	if err != nil {
 		return nil, err
@@ -97,18 +96,52 @@ func GetAllWorkers(db *sql.DB) ([]*pworker.Worker, error) {
 	return workers, err
 }
 
-func UpdateWorker(db *sql.DB, worker *pworker.Worker) error {
+func GetAllAliveWorkers(db *sql.DB) ([]*pworker.Worker, error) {
+	rows, err := db.Query(`
+		SELECT *
+		FROM workers
+		WHERE status = 'ALIVE'
+	`)
+	if err != nil {
+		return nil, err
+	}
+
+	var workers []*pworker.Worker
+	for rows.Next() {
+		var worker pworker.Worker
+		err = rows.Scan(
+			&worker.Id,
+			&worker.Address,
+			&worker.Status,
+			&worker.LastHB,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		workers = append(workers, &worker)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return workers, err
+}
+
+func UpdateWorker(db *sql.DB, worker *pworker.Worker) (shared.WorkerId, error) {
+	var id shared.WorkerId
 	err := db.QueryRow(
 		`UPDATE workers
 		SET
-			address = $1, 
 			status = $2, 
 			last_hb = $3
-		WHERE id = $4`,
-		worker.Address, worker.Status, worker.LastHB, worker.Id).
-		Err()
+		WHERE address = $1
+		RETURNING id`,
+		worker.Address, worker.Status, worker.LastHB).
+		Scan(&id)
 
-	return err
+	return id, err
 }
 
 func UpdateWorkerStatus(db *sql.DB, worker *pworker.Worker) error {

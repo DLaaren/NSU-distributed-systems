@@ -10,7 +10,7 @@ import (
 func CreateTableForTasks(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS tasks (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id SERIAL PRIMARY KEY,
 			input_range TEXT NOT NULL,
 			max_length INTEGER NOT NULL,
 			status TEXT NOT NULL,
@@ -25,15 +25,26 @@ func CreateTableForTasks(db *sql.DB) error {
 	return err
 }
 
-func AddTask(db *sql.DB, task *ptask.Task) error {
+func AddTask(db *sql.DB, task *ptask.Task) (shared.TaskId, error) {
 	var id shared.TaskId
 
 	err := db.QueryRow(
-		`INSERT INTO tasks (input_range, max_length, status, user_request_id, worker_id)
-		"VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO tasks (input_range, max_length, status, user_request_id)
+		VALUES ($1, $2, $3, $4)
 		RETURNING id`,
-		task.InputRange, task.MaxLength, ptask.IN_PROGRESS, task.RequestId, task.WorkerId).
+		task.InputRange, task.MaxLength, ptask.IN_PROGRESS, task.RequestId).
 		Scan(&id)
+
+	return id, err
+}
+
+func UpdateTaskWorkerId(db *sql.DB, task *ptask.Task) error {
+	err := db.QueryRow(
+		`UPDATE tasks
+		SET worker_id = $1
+		WHERE id = $2`,
+		task.WorkerId, task.Id).
+		Err()
 
 	return err
 }
@@ -42,7 +53,7 @@ func GetTasksByRequestId(db *sql.DB, requestId shared.UserRequestId) ([]ptask.Ta
 	rows, err := db.Query(`
 		SELECT status, result
 		FROM tasks
-		WHERE request_id = $1
+		WHERE user_request_id = $1
 	`, requestId)
 	if err != nil {
 		return nil, err
@@ -74,7 +85,7 @@ func GetTaskResultsByRequestId(db *sql.DB, requestId shared.UserRequestId) ([]pt
 	rows, err := db.Query(`
 		SELECT status, result
 		FROM tasks
-		WHERE request_id = $1
+		WHERE user_request_id = $1
 	`, requestId)
 	if err != nil {
 		return nil, err
@@ -131,7 +142,7 @@ func CountCompleteTasks(db *sql.DB, requestId shared.UserRequestId) (bool, error
             SUM(CASE WHEN status = 'DONE_SUCCESS' OR status = 'DONE_FAILURE' 
 			THEN 1 ELSE 0 END) AS completed
         FROM tasks
-        WHERE request_id = ?`,
+        WHERE user_request_id = $1`,
 		requestId).
 		Scan(&total, &completed)
 

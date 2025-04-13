@@ -10,11 +10,11 @@ import (
 func CreateTableForUserRequests(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS user_requests (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			id SERIAL PRIMARY KEY,
 			hash TEXT NOT NULL,
 			max_length INTEGER NOT NULL,
 			status TEXT NOT NULL,
-			result JSON
+			result JSON DEFAULT '[""]'
 		)
 	`)
 
@@ -26,7 +26,7 @@ func AddUserRequest(db *sql.DB, userRequest *prequest.UserRequest) (shared.UserR
 
 	err := db.QueryRow(
 		`INSERT INTO user_requests (hash, max_length, status)
-		"VALUES ($1, $2, $3)
+		VALUES ($1, $2, $3)
 		RETURNING id`,
 		userRequest.Hash, userRequest.MaxLength, prequest.PROCESSING).
 		Scan(&id)

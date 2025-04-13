@@ -51,9 +51,10 @@ func parse_configs() error {
 
 func register_worker() error {
 	var buf bytes.Buffer
+	wstatus := pworker.WorkerStatusResponse{Status: server_context.Status, Port: server_context.Port}
 
 	for attempt := 1; attempt <= server_context.MaxRetries; attempt++ {
-		if err := json.NewEncoder(&buf).Encode(server_context.Status); err != nil {
+		if err := json.NewEncoder(&buf).Encode(wstatus); err != nil {
 			return err
 		}
 
@@ -107,7 +108,7 @@ func main() {
 	log.Println("all handlers were set up")
 
 	server_context.RWmutex.Lock()
-	server_context.Status = pworker.IDLE
+	server_context.Status = pworker.ALIVE
 	server_context.RWmutex.Unlock()
 	//check if we died and then awaken and there is some tasks -> context.Status = CRACKING
 

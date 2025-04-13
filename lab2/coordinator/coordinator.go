@@ -38,10 +38,6 @@ func NewCoordinator(db *sql.DB) *Coordinator {
 }
 
 func (c *Coordinator) GetUserRequestStatus(requestId shared.UserRequestId) prequest.UserStatusResponse {
-	oldPrefix := log.Prefix()
-	log.SetPrefix("[Coordinator]: ")
-	defer log.SetPrefix(oldPrefix)
-
 	statusResponse, err := database.GetUserRequestStatusById(c.db, requestId)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -131,11 +127,27 @@ func (c *Coordinator) assignTasks(request *prequest.UserRequest) {
 		Status:    ptask.IN_PROGRESS,
 	}
 
-	workers, err := database.GetAllWorkers(c.db)
+	id, err := database.AddTask(c.db, &task)
 	if err != nil {
 		c.setRequestError(request)
+		log.Printf("ERROR while saving task\n")
+		return
+	}
+	task.Id = id
+
+get_workers:
+	workers, err := database.GetAllAliveWorkers(c.db)
+	if err != nil {
+		c.setRequestError(request)
+		log.Printf("ERROR cannot get alive workers\n")
+		return
 	}
 	numWorkers := len(workers)
+	if numWorkers == 0 {
+		log.Printf("WARNING no alive workers\n")
+		time.Sleep(c.DeadDelay)
+		goto get_workers
+	}
 	crack_len := request.MaxLength
 	chunks := splitRange(strings.Repeat("a", int(crack_len)), strings.Repeat("z", int(crack_len)), numWorkers)
 
@@ -156,16 +168,19 @@ func (c *Coordinator) assignTasks(request *prequest.UserRequest) {
 
 				launched, err := c.taskLaunch(worker, task)
 				if !launched || err != nil {
+					log.Printf("ERROR cannot assign task: %v\n", err)
 					if retry >= c.TaskRetries {
 						c.setRequestError(request)
+						return
 					}
 					retry++
 					goto retryTaskLaunch
 				}
 				task.WorkerId = worker.Id
-				err = database.AddTask(c.db, task)
+				err = database.UpdateTaskWorkerId(c.db, task)
 				if err != nil {
 					c.setRequestError(request)
+					log.Printf("ERROR while assigning task")
 				}
 			}
 		}
@@ -176,18 +191,12 @@ func (c *Coordinator) assignTasks(request *prequest.UserRequest) {
 	if ctx.Err() == context.DeadlineExceeded {
 		c.setRequestTimeout(request)
 
-		log.SetPrefix("[Coordinator]: ")
 		log.Printf("timeout while trying to assign tasks for user request with id = %d\n", request.Id)
-		log.SetPrefix("[Server]: ")
 	}
 }
 
 /* Creates task and map it to workers */
 func (c *Coordinator) Crack(request *prequest.UserRequest) (shared.UserRequestId, error) {
-	oldPrefix := log.Prefix()
-	log.SetPrefix("[Coordinator]: ")
-	defer log.SetPrefix(oldPrefix)
-
 	id, err := database.AddUserRequest(c.db, request)
 	if err != nil {
 		return shared.UserRequestId(0), err
@@ -203,60 +212,45 @@ func (c *Coordinator) Crack(request *prequest.UserRequest) (shared.UserRequestId
 
 /* Register worker */
 func (c *Coordinator) RegisterWorker(worker *pworker.Worker) error {
-	oldPrefix := log.Prefix()
-	log.SetPrefix("[Coordinator]: ")
-	defer log.SetPrefix(oldPrefix)
-
-	worker, err := database.GetWorkerByAddress(c.db, worker.Address)
+	_, err := database.GetWorkerByAddress(c.db, worker.Address)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 
 	var id shared.WorkerId
-	if worker == nil { /* Such worker isn't found then register this new one */
+	if err != nil && errors.Is(err, sql.ErrNoRows) { /* Such worker isn't found then register this new one */
 		id, err = database.AddWorker(c.db, worker)
+		log.Printf("Got new worker\n")
 	} else { /* This worker is existing then update it */
-		err = database.UpdateWorker(c.db, worker)
+		id, err = database.UpdateWorker(c.db, worker)
+		log.Printf("Got known worker\n")
 	}
 
-	log.Printf("RegisterWorker(worker) called: Id = %d; Address = %s Error = %v\n", id, worker.Address, err)
+	log.Printf("RegisterWorker(worker) called: Id = %d; Address = %s; Status = %s; Error = %v;\n", id, worker.Address, worker.Status, err)
 
 	return err
 }
 
 func (c *Coordinator) UpdateWorkerStatus(worker *pworker.Worker) error {
-	oldPrefix := log.Prefix()
-	log.SetPrefix("[Coordinator]: ")
-	defer log.SetPrefix(oldPrefix)
-
 	err := database.UpdateWorkerStatus(c.db, worker)
 
-	log.Printf("UpdateWorkerStatus(worker) called: Id = %d; Address = %s Error = %v\n", worker.Id, worker.Address, err)
+	log.Printf("UpdateWorkerStatus(worker) called: Id = %d; Address = %s; Status = %s; Error = %v\n", worker.Id, worker.Address, worker.Status, err)
 
 	return err
 }
 
-func (c *Coordinator) UpdateWorkerStatusAndLastHB(worker *pworker.Worker, time time.Time) error {
-	oldPrefix := log.Prefix()
-	log.SetPrefix("[Coordinator]: ")
-	defer log.SetPrefix(oldPrefix)
+func (c *Coordinator) UpdateWorkerStatusAndLastHB(worker *pworker.Worker) error {
+	_, err := database.UpdateWorker(c.db, worker)
 
-	worker.LastHB = time
-	err := database.UpdateWorker(c.db, worker)
-
-	log.Printf("UpdateWorkerStatusAndLastHB(worker, time) called: Id = %d; Address = %s Error = %v\n", worker.Id, worker.Address, err)
+	// log.Printf("UpdateWorkerStatusAndLastHB(worker, time) called: Id = %d; Address = %s Error = %v\n", id, worker.Address, err)
 
 	return err
 }
 
 func (c *Coordinator) DeleteWorker(worker *pworker.Worker) error {
-	oldPrefix := log.Prefix()
-	log.SetPrefix("[Coordinator]: ")
-	defer log.SetPrefix(oldPrefix)
-
 	err := database.DeleteWorker(c.db, worker)
 
-	log.Printf("DeleteWorker(worker) called: Id = %d; Address = %s Error = %v\n", worker.Id, worker.Address, err)
+	log.Printf("DeleteWorker(worker) called: Id = %d; Address = %s; Status = %s; Error = %v\n", worker.Id, worker.Address, worker.Status, err)
 
 	return err
 }
@@ -280,7 +274,7 @@ func (c *Coordinator) CheckWorkers() {
 				if worker.Status == pworker.DEAD && time.Since(worker.LastHB) >= c.DeadDelay {
 					err = c.DeleteWorker(worker)
 				} else {
-					err = c.UpdateWorkerStatusAndLastHB(worker, time.Now())
+					err = c.UpdateWorkerStatusAndLastHB(worker)
 				}
 				if err != nil {
 					return
@@ -291,21 +285,15 @@ func (c *Coordinator) CheckWorkers() {
 }
 
 func (c *Coordinator) sendHB(worker *pworker.Worker) {
-	resp, err := http.Get("http://" + worker.Address + "/internal/api/worker/status")
+	resp, err := http.Get("http://" + worker.Address + "/internal/api/worker/heartbeat")
 	if err != nil || resp.StatusCode != http.StatusOK {
 		worker.Status = pworker.DEAD
+		log.Printf("got error %v\n", err)
 		return
 	}
 	defer resp.Body.Close()
 
-	var statusResponse pworker.WorkerStatusResponse
-
-	if err := json.NewDecoder(resp.Body).Decode(&statusResponse); err != nil {
-		worker.Status = pworker.DEAD
-		return
-	}
-
-	worker.Status = statusResponse.Status
+	worker.Status = pworker.ALIVE
 	worker.LastHB = time.Now()
 }
 
@@ -355,17 +343,13 @@ func (c *Coordinator) finalizeUserRequest(requestId shared.UserRequestId) error 
 }
 
 func (c *Coordinator) taskLaunch(worker *pworker.Worker, task *ptask.Task) (bool, error) {
-	oldPrefix := log.Prefix()
-	log.SetPrefix("[Coordinator]: ")
-	defer log.SetPrefix(oldPrefix)
-
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(task); err != nil {
 		return false, err
 	}
 
 	resp, err := http.Post(
-		"http://"+worker.Address+"/internal/api/worker/crack?id="+strconv.FormatUint(uint64(task.Id), 10),
+		"http://"+worker.Address+"/internal/api/worker/crack?taskId="+strconv.FormatUint(uint64(task.Id), 10),
 		"application/json",
 		&buf)
 	if err != nil {
@@ -375,6 +359,7 @@ func (c *Coordinator) taskLaunch(worker *pworker.Worker, task *ptask.Task) (bool
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("ERROR non OK")
 		return false, nil
 	}
 	log.Printf("Successfully assigned task with id = %d from request with id = %d to worker with address = %s", task.Id, task.RequestId, worker.Address)
@@ -383,10 +368,6 @@ func (c *Coordinator) taskLaunch(worker *pworker.Worker, task *ptask.Task) (bool
 }
 
 func (c *Coordinator) taskKill(worker *pworker.Worker, task *ptask.Task) {
-	oldPrefix := log.Prefix()
-	log.SetPrefix("[Coordinator]: ")
-	defer log.SetPrefix(oldPrefix)
-
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(task); err != nil {
 		return
