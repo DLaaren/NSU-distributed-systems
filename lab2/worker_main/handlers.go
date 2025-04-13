@@ -1,4 +1,4 @@
-package worker
+package main
 
 import (
 	"bytes"
@@ -14,15 +14,16 @@ import (
 
 	"lab2/shared"
 	"lab2/task"
+	"lab2/worker"
 )
 
-func GetWorkerStatusHandler(worker *WorkerContext) http.HandlerFunc {
+func GetWorkerStatusHandler(sc *ServerContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		worker.rwmu.RLock()
-		response := shared.WorkerStatusResponse{
-			Status: worker.Status,
+		sc.RWmutex.RLock()
+		response := worker.WorkerStatusResponse{
+			Status: sc.Status,
 		}
-		worker.rwmu.RUnlock()
+		sc.RWmutex.RUnlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -30,13 +31,7 @@ func GetWorkerStatusHandler(worker *WorkerContext) http.HandlerFunc {
 	}
 }
 
-func RegisterTask(worker *WorkerContext, task *task.Task) {
-	worker.rwmu.Lock()
-	worker.Tasks[task.Id] = task
-	worker.rwmu.Unlock()
-}
-
-func SubmitTaskHandler(worker *WorkerContext, coordinatorAddress string) http.HandlerFunc {
+func SubmitTaskHandler(sc *ServerContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		queryParams := r.URL.Query()
 
@@ -51,7 +46,7 @@ func SubmitTaskHandler(worker *WorkerContext, coordinatorAddress string) http.Ha
 			log.Fatal(err)
 		}
 
-		var task shared.WorkerTask
+		var task task.Task
 		task.Id = shared.TaskId(value)
 		if err := json.NewDecoder(r.Body).Decode(&task); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -60,18 +55,21 @@ func SubmitTaskHandler(worker *WorkerContext, coordinatorAddress string) http.Ha
 
 		ctx, cancel := context.WithCancel(context.Background())
 		task.CancelFunc = cancel
-		RegisterTask(worker, &task)
 
-		go func() {
+		sc.RWmutex.Lock()
+		sc.Tasks = append(sc.Tasks, task)
+		sc.RWmutex.Unlock()
+
+		go func(sc *ServerContext, task *task.Task) {
 			defer cancel()
 			select {
 			case <-ctx.Done():
-				worker.rwmu.Lock()
-				task.Status = shared.KILLED
-				task.Result = ""
-				worker.rwmu.Unlock()
+				sc.RWmutex.RLock()
+				task.Status = task.KILLED
+				task.Result = []string{""}
+				sc.RWmutex.RUnlock()
 
-				SendTaskResultToCoordinator(task, coordinatorAddress)
+				SendTaskResultToCoordinator(task, sc.CoordinatorAddress)
 
 				return
 
@@ -105,40 +103,40 @@ func SubmitTaskHandler(worker *WorkerContext, coordinatorAddress string) http.Ha
 					computedHash := md5.Sum([]byte(input))
 					log.Println("input = "+input+"; computed hash = ", computedHash)
 					if hex.EncodeToString(computedHash[:]) == task.Hash {
-						worker.rwmu.Lock()
-						task.Status = shared.DONE_SUCCESS
+						sc.RWmutex.RLock()
+						task.Status = task.DONE_SUCCESS
 						task.Result = input
-						worker.rwmu.Unlock()
+						sc.RWmutex.RUnlock()
 
-						SendTaskResultToCoordinator(task, coordinatorAddress)
+						SendTaskResultToCoordinator(task, sc.CoordinatorAddress)
 						return
 					}
 				}
 
-				worker.rwmu.Lock()
-				task.Status = shared.DONE_FAILURE
+				sc.RWmutex.RLock()
+				task.Status = task.DONE_FAILURE
 				task.Result = ""
-				worker.rwmu.Unlock()
+				sc.RWmutex.RUnlock()
 
-				SendTaskResultToCoordinator(task, coordinatorAddress)
+				SendTaskResultToCoordinator(task, sc.CoordinatorAddress)
 			}
-		}()
+		}(sc, &task)
 
 		/* Wait for the context to be done (timeout or cancellation) */
 		<-ctx.Done()
 		if ctx.Err() == context.DeadlineExceeded {
-			worker.rwmu.Lock()
-			task.Status = shared.KILLED
-			task.Result = ""
-			worker.rwmu.Unlock()
+			sc.RWmutex.RLock()
+			task.Status = task.KILLED
+			task.Result = []string{""}
+			sc.RWmutex.RUnlock()
 
-			SendTaskResultToCoordinator(task, coordinatorAddress)
+			SendTaskResultToCoordinator(&task, sc.CoordinatorAddress)
 		}
 	}
 }
 
-func SendTaskResultToCoordinator(task task.Task, coordinatorAddress string) {
-	response := shared.TaskResultResponse{
+func SendTaskResultToCoordinator(task *task.Task, coordinatorAddress string) {
+	response := task.TaskResultResponse{
 		Status: task.Status,
 		Result: task.Result,
 	}
@@ -163,7 +161,7 @@ func SendTaskResultToCoordinator(task task.Task, coordinatorAddress string) {
 	}
 }
 
-func KillTaskHandler(worker *WorkerContext) http.HandlerFunc {
+func KillTaskHandler(sc *ServerContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		queryParams := r.URL.Query()
 
@@ -178,18 +176,25 @@ func KillTaskHandler(worker *WorkerContext) http.HandlerFunc {
 			log.Fatal(err)
 		}
 
-		worker.rwmu.Lock()
-		task, exists := worker.Tasks[shared.TaskId(taskId)]
-		if !exists {
+		var task *task.Task
+		task.Id = shared.TaskId(taskId)
+
+		sc.RWmutex.RLock()
+		for _, t := range sc.Tasks {
+			if t.Id == task.Id {
+				task = &t
+			}
+		}
+		sc.RWmutex.RUnlock()
+
+		if task == nil {
 			http.Error(w, "task with id = "+strconv.FormatUint(uint64(taskId), 10)+"not found", http.StatusNotFound)
-			worker.rwmu.Unlock()
 			return
 		}
 
-		worker.Tasks[shared.TaskId(taskId)].Status = shared.KILLED
-		worker.rwmu.Unlock()
-
+		sc.RWmutex.RLock()
 		task.CancelFunc()
+		sc.RWmutex.RUnlock()
 
 		w.WriteHeader(http.StatusOK)
 	}

@@ -7,21 +7,26 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
-	"lab1/shared"
-	"lab1/worker"
+	"lab2/task"
+	"lab2/worker"
 
 	"gopkg.in/yaml.v3"
 )
 
 type ServerContext struct {
-	Port               string `yaml:"port"`
-	CoordinatorAddress string `yaml:"coordinator_address"`
-	Worker             *worker.WorkerContext
+	Port               string        `yaml:"port"`
+	CoordinatorAddress string        `yaml:"coordinator_address"`
+	RetryConnectDelay  time.Duration `yaml:"retry_connect_delay"`
+	MaxRetries         int           `yaml:"max_retries"`
+	Status             worker.WorkerStatus
+	Tasks              []task.Task
+	RWmutex            sync.RWMutex
 }
 
-var context ServerContext
+var server_context ServerContext
 
 func parse_configs() error {
 	file, err := os.ReadFile("config.yaml")
@@ -29,7 +34,7 @@ func parse_configs() error {
 		return err
 	}
 
-	if err := yaml.Unmarshal(file, &context); err != nil {
+	if err := yaml.Unmarshal(file, &server_context); err != nil {
 		return err
 	}
 
@@ -37,21 +42,15 @@ func parse_configs() error {
 }
 
 func register_worker() error {
-	// to config
-	retryDelay := 5 * time.Second
-	maxRetries := 2
-
 	var buf bytes.Buffer
-	var worker shared.WorkerStatusResponse
-	worker.Status = context.Worker.Status
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if err := json.NewEncoder(&buf).Encode(worker); err != nil {
+	for attempt := 1; attempt <= server_context.MaxRetries; attempt++ {
+		if err := json.NewEncoder(&buf).Encode(server_context.Status); err != nil {
 			return err
 		}
 
 		resp, err := http.Post(
-			"http://"+context.CoordinatorAddress+"/internal/api/worker/register",
+			"http://"+server_context.CoordinatorAddress+"/internal/api/worker/register",
 			"application/json",
 			&buf)
 		if err != nil {
@@ -65,9 +64,9 @@ func register_worker() error {
 		} else {
 			log.Println("failed to register worker:", resp.Status)
 		}
-		if attempt < maxRetries {
+		if attempt < server_context.MaxRetries {
 			log.Println("try again after delay")
-			time.Sleep(retryDelay)
+			time.Sleep(server_context.RetryConnectDelay)
 		}
 	}
 
@@ -84,20 +83,20 @@ func main() {
 	}
 	log.Println("configs were parsed sucessfully")
 
-	context.Worker = &worker.WorkerContext{
-		Status: shared.IDLE,
-		Tasks: make(map[shared.TaskId]*shared.WorkerTask, 0),
-	}
-
-	http.HandleFunc("/internal/api/worker/status", worker.GetWorkerStatusHandler(context.Worker))
-	http.HandleFunc("/internal/api/worker/crack", worker.SubmitTaskHandler(context.Worker, context.CoordinatorAddress))
-	http.HandleFunc("/internal/api/worker/kill", worker.KillTaskHandler(context.Worker))
+	http.HandleFunc("/internal/api/worker/status", worker.GetWorkerStatusHandler(&server_context))
+	http.HandleFunc("/internal/api/worker/crack", worker.SubmitTaskHandler(&server_context))
+	http.HandleFunc("/internal/api/worker/kill", worker.KillTaskHandler(&server_context))
 	http.HandleFunc("/internal/api/worker/heartbeat", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("alive"))
 	})
 
 	log.Println("all handlers were set up")
+
+	server_context.RWmutex.Lock()
+	server_context.Status = worker.IDLE
+	server_context.RWmutex.Unlock()
+	//check if we died and then awaken and there is some tasks -> context.Status = CRACKING
 
 	if err := register_worker(); err != nil {
 		log.Println("failed to register worker after retries:", err)
@@ -106,8 +105,12 @@ func main() {
 	log.Println("register worker sucessfully")
 
 	go func() {
-		log.Println("server is listening on port", context.Port)
-		if err := http.ListenAndServe(":"+context.Port, nil); err != nil {
+		server_context.RWmutex.RLock()
+		port := server_context.Port
+		server_context.RWmutex.RUnlock()
+
+		log.Println("server is listening on port", port)
+		if err := http.ListenAndServe(":"+port, nil); err != nil {
 			log.Println("error while starting server:", err)
 			return
 		}
