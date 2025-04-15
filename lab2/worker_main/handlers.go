@@ -61,6 +61,8 @@ func SubmitTaskHandler(sc *ServerContext) http.HandlerFunc {
 		sc.Tasks = append(sc.Tasks, task)
 		sc.RWmutex.Unlock()
 
+		log.Printf("Got task with id = %d and range = %s", task.Id, task.InputRange)
+
 		go func(sc *ServerContext, task *ptask.Task) {
 			defer cancel()
 			select {
@@ -100,39 +102,34 @@ func SubmitTaskHandler(sc *ServerContext) http.HandlerFunc {
 					return string(runes)
 				}
 
+				success := false
 				for input := start; strings.Compare(end, input) >= 0; input = incrementString(input) {
 					computedHash := md5.Sum([]byte(input))
 					// log.Println("input = "+input+"; computed hash = ", computedHash)
 					if hex.EncodeToString(computedHash[:]) == task.Hash {
-						sc.RWmutex.RLock()
+						sc.RWmutex.Lock()
 						task.Status = ptask.DONE_SUCCESS
 						task.Result = append(task.Result, input)
-						sc.RWmutex.RUnlock()
-
-						SendTaskResultToCoordinator(task, sc.CoordinatorAddress)
-						return
+						sc.RWmutex.Unlock()
+						success = true
+					}
+					if strings.Compare(end, input) == 0 {
+						break
 					}
 				}
 
-				sc.RWmutex.RLock()
-				task.Status = ptask.DONE_FAILURE
-				task.Result = []string{""}
-				sc.RWmutex.RUnlock()
+				if !success {
+					sc.RWmutex.Lock()
+					task.Status = ptask.DONE_FAILURE
+					task.Result = []string{""}
+					sc.RWmutex.Unlock()
+				}
 
 				SendTaskResultToCoordinator(task, sc.CoordinatorAddress)
 			}
 		}(sc, &task)
 
-		/* Wait for the context to be done (timeout or cancellation) */
-		<-ctx.Done()
-		if ctx.Err() == context.DeadlineExceeded {
-			sc.RWmutex.RLock()
-			task.Status = ptask.KILLED
-			task.Result = []string{""}
-			sc.RWmutex.RUnlock()
-
-			SendTaskResultToCoordinator(&task, sc.CoordinatorAddress)
-		}
+		w.WriteHeader(http.StatusOK)
 	}
 }
 
@@ -160,6 +157,8 @@ func SendTaskResultToCoordinator(task *ptask.Task, coordinatorAddress string) {
 	if resp.StatusCode != http.StatusOK {
 		log.Fatal("unexpected status code:", resp.StatusCode)
 	}
+
+	log.Printf("Send assigned task with id = %d to coordinator", task.Id)
 }
 
 func KillTaskHandler(sc *ServerContext) http.HandlerFunc {

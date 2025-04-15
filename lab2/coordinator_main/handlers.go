@@ -95,12 +95,31 @@ func RegisterNewWorkerHandler(coord *pcoordinator.Coordinator) http.HandlerFunc 
 
 func GetTaskResultHandler(coord *pcoordinator.Coordinator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		queryParams := r.URL.Query()
+
+		taskId := queryParams.Get("taskId")
+		if taskId == "" {
+			http.Error(w, "Missing taskId parameter", http.StatusBadRequest)
+			return
+		}
+
+		value, err := strconv.ParseUint(taskId, 10, 32)
+		if err != nil {
+			http.Error(w, "Invalid taskId parameter", http.StatusInternalServerError)
+			return
+		}
+
 		var task ptask.Task
 		if err := json.NewDecoder(r.Body).Decode(&task); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
+		task.Id = shared.TaskId(value)
 
-		coord.UpdateTask(&task)
+		err = coord.UpdateTask(&task)
+		if err != nil {
+			http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+			return
+		}
 	}
 }

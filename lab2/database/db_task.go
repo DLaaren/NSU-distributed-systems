@@ -2,9 +2,12 @@ package database
 
 import (
 	"database/sql"
+	"log"
 
 	"lab2/shared"
 	"lab2/task"
+
+	"github.com/lib/pq"
 )
 
 func CreateTableForTasks(db *sql.DB) error {
@@ -14,7 +17,7 @@ func CreateTableForTasks(db *sql.DB) error {
 			input_range TEXT NOT NULL,
 			max_length INTEGER NOT NULL,
 			status TEXT NOT NULL,
-			result JSON,
+			result TEXT[] DEFAULT ARRAY['']::TEXT[],
 			user_request_id INTEGER NOT NULL,
 			worker_id INTEGER,
 			FOREIGN KEY (user_request_id) REFERENCES user_requests(id) ON DELETE CASCADE,
@@ -49,9 +52,28 @@ func UpdateTaskWorkerId(db *sql.DB, task *ptask.Task) error {
 	return err
 }
 
+func GetTask(db *sql.DB, id shared.TaskId) (*ptask.Task, error) {
+	var task ptask.Task
+	err := db.QueryRow(
+		`SELECT *
+		FROM tasks
+		WHERE id = $1`,
+		id).
+		Scan(
+			&task.Id,
+			&task.InputRange,
+			&task.MaxLength,
+			&task.Status,
+			pq.Array(&task.Result),
+			&task.RequestId,
+			&task.WorkerId)
+
+	return &task, err
+}
+
 func GetTasksByRequestId(db *sql.DB, requestId shared.UserRequestId) ([]ptask.Task, error) {
 	rows, err := db.Query(`
-		SELECT status, result
+		SELECT *
 		FROM tasks
 		WHERE user_request_id = $1
 	`, requestId)
@@ -69,7 +91,7 @@ func GetTasksByRequestId(db *sql.DB, requestId shared.UserRequestId) ([]ptask.Ta
 			&task.InputRange,
 			&task.MaxLength,
 			&task.Status,
-			&task.Result,
+			pq.Array(&task.Result),
 			&task.RequestId,
 			&task.WorkerId)
 		if err != nil {
@@ -98,7 +120,7 @@ func GetTaskResultsByRequestId(db *sql.DB, requestId shared.UserRequestId) ([]pt
 		var status ptask.TaskStatus
 		var result []string
 
-		err = rows.Scan(&status, &result)
+		err = rows.Scan(&status, pq.Array(&result))
 		if err != nil {
 			return nil, err
 		}
@@ -113,9 +135,9 @@ func UpdateTaskStatusAndResult(db *sql.DB, task *ptask.Task) error {
 		`UPDATE tasks
 		SET
 			status = $1, 
-			result = $2, 
+			result = $2 
 		WHERE id = $3`,
-		task.Status, task.Result, task.Id).
+		task.Status, pq.Array(task.Result), task.Id).
 		Err()
 
 	return err
@@ -126,9 +148,9 @@ func UpdateTaskStatusAndResultByRequestId(db *sql.DB, requestId shared.UserReque
 		`UPDATE tasks
 		SET
 			status = $1, 
-			result = $2, 
+			result = $2 
 		WHERE user_request_id = $3`,
-		status, result, requestId).
+		status, pq.Array(result), requestId).
 		Err()
 
 	return err
@@ -139,8 +161,8 @@ func CountCompleteTasks(db *sql.DB, requestId shared.UserRequestId) (bool, error
 	err := db.QueryRow(
 		`SELECT 
             COUNT(*) AS total,
-            SUM(CASE WHEN status = 'DONE_SUCCESS' OR status = 'DONE_FAILURE' 
-			THEN 1 ELSE 0 END) AS completed
+            COALESCE(SUM(CASE WHEN status = 'DONE_SUCCESS' OR status = 'DONE_FAILURE' 
+			THEN 1 ELSE 0 END), 0) AS completed
         FROM tasks
         WHERE user_request_id = $1`,
 		requestId).
@@ -152,5 +174,8 @@ func CountCompleteTasks(db *sql.DB, requestId shared.UserRequestId) (bool, error
 	} else if total-completed == 0 {
 		allCompleted = true
 	}
+
+	log.Printf("RequestId = %d %d/%d tasks\n", requestId, completed, total)
+
 	return allCompleted, err
 }

@@ -120,21 +120,6 @@ func (c *Coordinator) setRequestTimeout(request *prequest.UserRequest) {
 }
 
 func (c *Coordinator) assignTasks(request *prequest.UserRequest) {
-	task := ptask.Task{
-		RequestId: request.Id,
-		Hash:      request.Hash,
-		MaxLength: request.MaxLength,
-		Status:    ptask.IN_PROGRESS,
-	}
-
-	id, err := database.AddTask(c.db, &task)
-	if err != nil {
-		c.setRequestError(request)
-		log.Printf("ERROR while saving task\n")
-		return
-	}
-	task.Id = id
-
 get_workers:
 	workers, err := database.GetAllAliveWorkers(c.db)
 	if err != nil {
@@ -154,10 +139,25 @@ get_workers:
 	ctx, cancel := context.WithTimeout(context.Background(), c.TaskTimeout)
 	defer cancel()
 
-	go func(c *Coordinator, request *prequest.UserRequest, task *ptask.Task) {
+	go func(c *Coordinator, request *prequest.UserRequest) {
+		task := ptask.Task{
+			RequestId: request.Id,
+			Hash:      request.Hash,
+			MaxLength: request.MaxLength,
+			Status:    ptask.IN_PROGRESS,
+		}
+
 		retry := 0
 		for i, chunk := range chunks {
 			task.InputRange = chunk
+
+			id, err := database.AddTask(c.db, &task)
+			if err != nil {
+				c.setRequestError(request)
+				log.Printf("ERROR while saving task\n")
+				return
+			}
+			task.Id = id
 
 		retryTaskLaunch:
 			select {
@@ -166,7 +166,7 @@ get_workers:
 			default:
 				worker := workers[(i+retry)%numWorkers]
 
-				launched, err := c.taskLaunch(worker, task)
+				launched, err := c.taskLaunch(worker, &task)
 				if !launched || err != nil {
 					log.Printf("ERROR cannot assign task: %v\n", err)
 					if retry >= c.TaskRetries {
@@ -177,14 +177,14 @@ get_workers:
 					goto retryTaskLaunch
 				}
 				task.WorkerId = worker.Id
-				err = database.UpdateTaskWorkerId(c.db, task)
+				err = database.UpdateTaskWorkerId(c.db, &task)
 				if err != nil {
 					c.setRequestError(request)
 					log.Printf("ERROR while assigning task")
 				}
 			}
 		}
-	}(c, request, &task)
+	}(c, request)
 
 	/* Wait for the context to be done (timeout or cancellation) */
 	<-ctx.Done()
@@ -288,7 +288,6 @@ func (c *Coordinator) sendHB(worker *pworker.Worker) {
 	resp, err := http.Get("http://" + worker.Address + "/internal/api/worker/heartbeat")
 	if err != nil || resp.StatusCode != http.StatusOK {
 		worker.Status = pworker.DEAD
-		log.Printf("got error %v\n", err)
 		return
 	}
 	defer resp.Body.Close()
@@ -298,17 +297,31 @@ func (c *Coordinator) sendHB(worker *pworker.Worker) {
 }
 
 func (c *Coordinator) UpdateTask(task *ptask.Task) error {
-	database.UpdateTaskStatusAndResult(c.db, task)
+	log.Printf("Got task with id = %d and status = %s; result = %s", task.Id, task.Status, task.Result)
 
-	// check if all tasks are done
+	err := database.UpdateTaskStatusAndResult(c.db, task)
+	if err != nil {
+		log.Printf("Err1 = %v", err)
+		return err
+	}
+
+	task, err = database.GetTask(c.db, task.Id)
+	if err != nil {
+		log.Printf("Err2 = %v", err)
+		return err
+	}
+
+	/* check if all tasks are done */
 	complete, err := database.CountCompleteTasks(c.db, task.RequestId)
 	if err != nil {
+		log.Printf("Err3 = %v", err)
 		return err
 	}
 
 	if complete {
 		err = c.finalizeUserRequest(task.RequestId)
 		if err != nil {
+			log.Printf("Err4 = %v", err)
 			return err
 		}
 	}

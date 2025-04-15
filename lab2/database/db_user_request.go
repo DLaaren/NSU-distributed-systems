@@ -5,6 +5,8 @@ import (
 
 	"lab2/request"
 	"lab2/shared"
+
+	"github.com/lib/pq"
 )
 
 func CreateTableForUserRequests(db *sql.DB) error {
@@ -14,7 +16,7 @@ func CreateTableForUserRequests(db *sql.DB) error {
 			hash TEXT NOT NULL,
 			max_length INTEGER NOT NULL,
 			status TEXT NOT NULL,
-			result JSON DEFAULT '[""]'
+			result TEXT[] DEFAULT ARRAY['']::TEXT[]
 		)
 	`)
 
@@ -46,7 +48,7 @@ func GetUserRequestById(db *sql.DB, id shared.UserRequestId) (*prequest.UserRequ
 			&userRequest.Hash,
 			&userRequest.MaxLength,
 			&userRequest.Status,
-			&userRequest.Result)
+			pq.Array(&userRequest.Result))
 
 	return &userRequest, err
 }
@@ -59,7 +61,7 @@ func GetUserRequestStatusById(db *sql.DB, id shared.UserRequestId) (prequest.Use
 		FROM user_requests
 		WHERE id = $1`,
 		id).
-		Scan(&userStatusResponse.Status, &userStatusResponse.Result)
+		Scan(&userStatusResponse.Status, pq.Array(&userStatusResponse.Result))
 
 	return userStatusResponse, err
 }
@@ -69,9 +71,9 @@ func UpdateRequestStatusAndResult(db *sql.DB, id shared.UserRequestId, status pr
 		`UPDATE user_requests
 		SET
 			status = $1, 
-			result = $2, 
+			result = $2 
 		WHERE id = $3`,
-		status, result, id).
+		status, pq.Array(result), id).
 		Err()
 
 	return err
