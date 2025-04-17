@@ -1,5 +1,6 @@
 port: 8080
 db_conn_str: "host=postgres port=5432 user=coordinator_user password=coordinator_password dbname=coordinator_db sslmode=disable"
+rabbitmq_conn_str: "amqp://guest:guest@rabbitmq:5672/"
 heartbeat_delay: 1s
 dead_delay: 2m
 task_timeout: 20m

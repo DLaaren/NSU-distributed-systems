@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
+
 	"lab2/database"
 	"lab2/request"
 	"lab2/shared"
@@ -22,6 +24,7 @@ import (
 
 type Coordinator struct {
 	db             *sql.DB
+	channel        *amqp.Channel
 	HeartbeatDelay time.Duration
 	DeadDelay      time.Duration
 	TaskTimeout    time.Duration
@@ -29,12 +32,61 @@ type Coordinator struct {
 }
 
 /* Init Coordinator instance */
-func NewCoordinator(db *sql.DB) *Coordinator {
+func NewCoordinator(db *sql.DB, rabbitmq *amqp.Connection) (*Coordinator, error) {
 	log.Println("Coordinator was created")
 
-	return &Coordinator{
-		db: db,
+	channel, err := rabbitmq.Channel()
+	if err != nil {
+		return nil, err
 	}
+
+	err = channel.ExchangeDeclare(
+		"exchange",
+		"direct",
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Coordinator{
+		db:      db,
+		channel: channel,
+	}, nil
+}
+
+func (c *Coordinator) PublishTask(worker *pworker.Worker, task_json bytes.Buffer) error {
+	return c.channel.Publish(
+		"",
+		strconv.FormatUint(uint64(worker.Id), 10),
+		false,
+		false,
+		amqp.Publishing{
+			DeliveryMode: amqp.Persistent,
+			ContentType:  "application/json",
+			Priority:     0,
+			Body:         task_json.Bytes(),
+		},
+	)
+}
+
+func (c *Coordinator) PublishKillingTask(worker *pworker.Worker, task_json bytes.Buffer) error {
+	return c.channel.Publish(
+		"",
+		strconv.FormatUint(uint64(worker.Id), 10),
+		false,
+		false,
+		amqp.Publishing{
+			DeliveryMode: amqp.Persistent,
+			ContentType:  "application/json",
+			Priority:     9,
+			Body:         task_json.Bytes(),
+		},
+	)
 }
 
 func (c *Coordinator) GetUserRequestStatus(requestId shared.UserRequestId) prequest.UserStatusResponse {
@@ -301,27 +353,23 @@ func (c *Coordinator) UpdateTask(task *ptask.Task) error {
 
 	err := database.UpdateTaskStatusAndResult(c.db, task)
 	if err != nil {
-		log.Printf("Err1 = %v", err)
 		return err
 	}
 
 	task, err = database.GetTask(c.db, task.Id)
 	if err != nil {
-		log.Printf("Err2 = %v", err)
 		return err
 	}
 
 	/* check if all tasks are done */
 	complete, err := database.CountCompleteTasks(c.db, task.RequestId)
 	if err != nil {
-		log.Printf("Err3 = %v", err)
 		return err
 	}
 
 	if complete {
 		err = c.finalizeUserRequest(task.RequestId)
 		if err != nil {
-			log.Printf("Err4 = %v", err)
 			return err
 		}
 	}
@@ -361,21 +409,23 @@ func (c *Coordinator) taskLaunch(worker *pworker.Worker, task *ptask.Task) (bool
 		return false, err
 	}
 
-	resp, err := http.Post(
-		"http://"+worker.Address+"/internal/api/worker/crack?taskId="+strconv.FormatUint(uint64(task.Id), 10),
-		"application/json",
-		&buf)
-	if err != nil {
-		return false, err
-	}
+	c.PublishTask(worker, buf)
 
-	defer resp.Body.Close()
+	// resp, err := http.Post(
+	// 	"http://"+worker.Address+"/internal/api/worker/crack?taskId="+strconv.FormatUint(uint64(task.Id), 10),
+	// 	"application/json",
+	// 	&buf)
+	// if err != nil {
+	// 	return false, err
+	// }
 
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("ERROR non OK")
-		return false, nil
-	}
-	log.Printf("Successfully assigned task with id = %d from request with id = %d to worker with address = %s", task.Id, task.RequestId, worker.Address)
+	// defer resp.Body.Close()
+
+	// if resp.StatusCode != http.StatusOK {
+	// 	log.Printf("ERROR non OK")
+	// 	return false, nil
+	// }
+	log.Printf("Successfully assigned task with id = %d from request with id = %d to worker %d with address = %s", task.Id, task.RequestId, worker.Id, worker.Address)
 
 	return true, nil
 }
@@ -386,18 +436,20 @@ func (c *Coordinator) taskKill(worker *pworker.Worker, task *ptask.Task) {
 		return
 	}
 
-	resp, err := http.Post(
-		"http://"+worker.Address+"/internal/api/worker/kill?id="+strconv.FormatUint(uint64(task.Id), 10),
-		"application/json",
-		&buf)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
+	c.PublishKillingTask(worker, buf)
 
-	if resp.StatusCode != http.StatusOK {
-		return
-	}
+	// resp, err := http.Post(
+	// 	"http://"+worker.Address+"/internal/api/worker/kill?id="+strconv.FormatUint(uint64(task.Id), 10),
+	// 	"application/json",
+	// 	&buf)
+	// if err != nil {
+	// 	return
+	// }
+	// defer resp.Body.Close()
 
-	log.Printf("Successfully killed task with id = %d from request with id = %d to worker with address = %s", task.Id, task.RequestId, worker.Address)
+	// if resp.StatusCode != http.StatusOK {
+	// 	return
+	// }
+
+	log.Printf("Successfully killed task with id = %d from request with id = %d to worker %d with address = %s", task.Id, task.RequestId, worker.Id, worker.Address)
 }

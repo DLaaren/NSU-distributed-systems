@@ -18,6 +18,12 @@ services:
       timeout: 5s
       retries: 5
 
+  rabbitmq:
+    image: --
+    container_name: rabbitmq
+    networks:
+      - app-network
+
   coordinator:
     build:
       context: .

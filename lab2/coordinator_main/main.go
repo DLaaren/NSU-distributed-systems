@@ -7,6 +7,7 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"gopkg.in/yaml.v3"
 
 	"lab2/coordinator"
@@ -14,18 +15,20 @@ import (
 )
 
 type ServerContext struct {
-	Port        string
-	Coordinator *pcoordinator.Coordinator
-	DbConnStr   string
+	Port            string
+	Coordinator     *pcoordinator.Coordinator
+	DbConnStr       string
+	RabbitMqConnStr string
 }
 
 type Config struct {
-	Port           string        `yaml:"port"`
-	DbConnStr      string        `yaml:"db_conn_str"`
-	HeartbeatDelay time.Duration `yaml:"heartbeat_delay"`
-	DeadDelay      time.Duration `yaml:"dead_delay"`
-	TaskTimeout    time.Duration `yaml:"task_timeout"`
-	TaskRetries    int           `yaml:"task_retries"`
+	Port            string        `yaml:"port"`
+	DbConnStr       string        `yaml:"db_conn_str"`
+	RabbitMqConnStr string        `yaml:"rabbitmq_conn_str"`
+	HeartbeatDelay  time.Duration `yaml:"heartbeat_delay"`
+	DeadDelay       time.Duration `yaml:"dead_delay"`
+	TaskTimeout     time.Duration `yaml:"task_timeout"`
+	TaskRetries     int           `yaml:"task_retries"`
 }
 
 var context ServerContext
@@ -54,16 +57,26 @@ func main() {
 	}
 	log.Println("configs were parsed sucessfully")
 
-	context.DbConnStr = config.DbConnStr
 	context.Port = config.Port
+	context.DbConnStr = config.DbConnStr
+	context.RabbitMqConnStr = config.RabbitMqConnStr
 
+	/* Connect to database*/
 	db, err := database.Initdb(context.DbConnStr)
 	if err != nil {
-		log.Printf("cannot connect to database: %s\n", err)
-		return
+		log.Fatalf("cannot connect to database: %s\n", err)
 	}
 
-	context.Coordinator = pcoordinator.NewCoordinator(db)
+	/* Connect to rabbitmq */
+	rabbitmq, err := amqp.Dial(context.RabbitMqConnStr)
+	if err != nil {
+		log.Fatalf("cannot connect to RabbitMQ server: %s\n", err)
+	}
+
+	context.Coordinator, err = pcoordinator.NewCoordinator(db, rabbitmq)
+	if err != nil {
+		log.Fatalf("cannot create coordinator: %s\n", err)
+	}
 	context.Coordinator.HeartbeatDelay = config.HeartbeatDelay
 	context.Coordinator.DeadDelay = config.DeadDelay
 	context.Coordinator.TaskTimeout = config.TaskTimeout
