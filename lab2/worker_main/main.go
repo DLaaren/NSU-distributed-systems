@@ -7,30 +7,37 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
-	"lab2/task"
-	"lab2/worker"
+	"lab2/shared"
+	ptask "lab2/task"
+	pworker "lab2/worker"
 
+	amqp "github.com/rabbitmq/amqp091-go"
 	"gopkg.in/yaml.v3"
 )
 
 type ServerContext struct {
 	Port               string
 	CoordinatorAddress string
+	RabbitMqConnStr    string
+	Channel            *amqp.Channel
+	ExchangeName       string
+	TasksQueue         amqp.Queue
+	MyWorkerId         shared.WorkerId
 	RetryConnectDelay  time.Duration
 	MaxRetries         int
 	Status             pworker.WorkerStatus
-	Tasks              []ptask.Task
+	Tasks              []*ptask.Task
 	RWmutex            sync.RWMutex
 }
 
 type Config struct {
-	Port               string        `yaml:"port"`
-	CoordinatorAddress string        `yaml:"coordinator_address"`
-	RetryConnectDelay  time.Duration `yaml:"retry_connect_delay"`
-	MaxRetries         int           `yaml:"max_retries"`
+	Port              string        `yaml:"port"`
+	RetryConnectDelay time.Duration `yaml:"retry_connect_delay"`
+	MaxRetries        int           `yaml:"max_retries"`
 }
 
 var server_context ServerContext
@@ -69,7 +76,11 @@ func register_worker() error {
 		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusOK {
-			return nil
+			if err := json.NewDecoder(resp.Body).Decode(&server_context.MyWorkerId); err != nil {
+				log.Println("failed to register worker:", resp.Status)
+			} else {
+				return nil
+			}
 		} else {
 			log.Println("failed to register worker:", resp.Status)
 		}
@@ -93,9 +104,80 @@ func main() {
 	log.Println("configs were parsed sucessfully")
 
 	server_context.Port = config.Port
-	server_context.CoordinatorAddress = config.CoordinatorAddress
+	server_context.CoordinatorAddress = os.Getenv("COORDINATOR_ADDR")
+	server_context.RabbitMqConnStr = os.Getenv("RABBITMQ_URL")
+	server_context.ExchangeName = os.Getenv("EXCHANGE_NAME")
 	server_context.RetryConnectDelay = config.RetryConnectDelay
 	server_context.MaxRetries = config.MaxRetries
+
+	/* Connect to rabbitmq */
+	rabbitmq, err := amqp.Dial(server_context.RabbitMqConnStr)
+	if err != nil {
+		log.Fatalf("cannot connect to RabbitMQ server: %s\n", err)
+	}
+
+	if err := register_worker(); err != nil {
+		log.Fatalf("failed to register worker after retries: %s\n", err)
+	}
+	log.Printf("register worker sucessfully, my id = %d", server_context.MyWorkerId)
+
+	/* init zone */
+	server_context.Status = pworker.ALIVE
+	channel, err := rabbitmq.Channel()
+	if err != nil {
+		log.Fatalf("failed to open rabbitmq channel: %s\n", err)
+	}
+
+	server_context.Channel = channel
+
+	err = channel.ExchangeDeclare(
+		server_context.ExchangeName,
+		"direct",
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	server_context.TasksQueue, err = channel.QueueDeclare(
+		"worker_queue_"+strconv.FormatUint(uint64(server_context.MyWorkerId), 10),
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		log.Fatalf("failed to declare rabbitmq queue: %v", err)
+	}
+
+	/* bind queue to exchange with worker ID as routing key */
+	err = channel.QueueBind(
+		server_context.TasksQueue.Name,
+		server_context.TasksQueue.Name,
+		server_context.ExchangeName,
+		false,
+		nil,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	messages, err := channel.Consume(
+		server_context.TasksQueue.Name,
+		"",
+		true,
+		false,
+		false,
+		false,
+		nil)
+	if err != nil {
+		log.Fatalf("failed to register a consumer: %v", err)
+	}
 
 	http.HandleFunc("/internal/api/worker/status", GetWorkerStatusHandler(&server_context))
 	http.HandleFunc("/internal/api/worker/crack", SubmitTaskHandler(&server_context))
@@ -107,16 +189,54 @@ func main() {
 
 	log.Println("all handlers were set up")
 
-	server_context.RWmutex.Lock()
-	server_context.Status = pworker.ALIVE
-	server_context.RWmutex.Unlock()
-	//check if we died and then awaken and there is some tasks -> context.Status = CRACKING
+	go func() {
+		for message := range messages {
+			tag, ok := message.Headers["tag"]
+			if !ok {
+				log.Printf("Message missing 'tag' header")
+				message.Nack(false, false) // Discard message
+				continue
+			}
 
-	if err := register_worker(); err != nil {
-		log.Println("failed to register worker after retries:", err)
-		return
-	}
-	log.Println("register worker sucessfully")
+			tagStr, ok := tag.(string)
+			if !ok {
+				log.Printf("Tag header is not a string")
+				message.Nack(false, false)
+				continue
+			}
+
+			go func() {
+				var task ptask.Task
+				if err := json.Unmarshal(message.Body, &task); err != nil {
+					log.Printf("Failed to decode task: %v", err)
+					message.Nack(false, false) // Discard message
+					return
+				}
+
+				switch tagStr {
+				case "submit":
+					err := SubmitTask(&server_context, &task)
+					if err != nil {
+						log.Printf("Failed to submit task: %v", err)
+						message.Nack(false, true) // Requeue on temporary failure
+						return
+					}
+				case "kill":
+					err := KillTask(&server_context, &task)
+					if err != nil {
+						log.Printf("Failed to kill task: %v", err)
+						// Don't requeue kill commands
+						message.Nack(false, false)
+						return
+					}
+				default:
+					log.Printf("Unknown message tag: %s", tagStr)
+					message.Nack(false, false) // Discard unknown message types
+					return
+				}
+			}()
+		}
+	}()
 
 	go func() {
 		server_context.RWmutex.RLock()

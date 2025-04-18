@@ -19,16 +19,15 @@ type ServerContext struct {
 	Coordinator     *pcoordinator.Coordinator
 	DbConnStr       string
 	RabbitMqConnStr string
+	ExchangeName    string
 }
 
 type Config struct {
-	Port            string        `yaml:"port"`
-	DbConnStr       string        `yaml:"db_conn_str"`
-	RabbitMqConnStr string        `yaml:"rabbitmq_conn_str"`
-	HeartbeatDelay  time.Duration `yaml:"heartbeat_delay"`
-	DeadDelay       time.Duration `yaml:"dead_delay"`
-	TaskTimeout     time.Duration `yaml:"task_timeout"`
-	TaskRetries     int           `yaml:"task_retries"`
+	Port           string        `yaml:"port"`
+	HeartbeatDelay time.Duration `yaml:"heartbeat_delay"`
+	DeadDelay      time.Duration `yaml:"dead_delay"`
+	TaskTimeout    time.Duration `yaml:"task_timeout"`
+	TaskRetries    int           `yaml:"task_retries"`
 }
 
 var context ServerContext
@@ -58,8 +57,15 @@ func main() {
 	log.Println("configs were parsed sucessfully")
 
 	context.Port = config.Port
-	context.DbConnStr = config.DbConnStr
-	context.RabbitMqConnStr = config.RabbitMqConnStr
+	// "host=postgres port=5432 user=coordinator_user password=coordinator_password dbname=coordinator_db sslmode=disable"
+	context.DbConnStr = "host=" + os.Getenv("DB_HOST") +
+		" port=" + os.Getenv("DB_PORT") +
+		" user=" + os.Getenv("DB_USER") +
+		" password=" + os.Getenv("DB_PASSWORD") +
+		" dbname=" + os.Getenv("DB_NAME") +
+		" sslmode=disable"
+	context.RabbitMqConnStr = os.Getenv("RABBITMQ_URL")
+	context.ExchangeName = os.Getenv("EXCHANGE_NAME")
 
 	/* Connect to database*/
 	db, err := database.Initdb(context.DbConnStr)
@@ -73,7 +79,8 @@ func main() {
 		log.Fatalf("cannot connect to RabbitMQ server: %s\n", err)
 	}
 
-	context.Coordinator, err = pcoordinator.NewCoordinator(db, rabbitmq)
+	/* Create coordinator */
+	context.Coordinator, err = pcoordinator.NewCoordinator(db, rabbitmq, context.ExchangeName)
 	if err != nil {
 		log.Fatalf("cannot create coordinator: %s\n", err)
 	}

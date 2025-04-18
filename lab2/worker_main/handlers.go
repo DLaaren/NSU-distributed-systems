@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -15,6 +16,8 @@ import (
 	"lab2/shared"
 	"lab2/task"
 	"lab2/worker"
+
+	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 func GetWorkerStatusHandler(sc *ServerContext) http.HandlerFunc {
@@ -58,7 +61,7 @@ func SubmitTaskHandler(sc *ServerContext) http.HandlerFunc {
 		task.CancelFunc = cancel
 
 		sc.RWmutex.Lock()
-		sc.Tasks = append(sc.Tasks, task)
+		sc.Tasks = append(sc.Tasks, &task)
 		sc.RWmutex.Unlock()
 
 		log.Printf("Got task with id = %d and range = %s", task.Id, task.InputRange)
@@ -67,10 +70,10 @@ func SubmitTaskHandler(sc *ServerContext) http.HandlerFunc {
 			defer cancel()
 			select {
 			case <-ctx.Done():
-				sc.RWmutex.RLock()
+				sc.RWmutex.Lock()
 				task.Status = ptask.KILLED
 				task.Result = []string{""}
-				sc.RWmutex.RUnlock()
+				sc.RWmutex.Unlock()
 
 				SendTaskResultToCoordinator(task, sc.CoordinatorAddress)
 
@@ -181,7 +184,7 @@ func KillTaskHandler(sc *ServerContext) http.HandlerFunc {
 		sc.RWmutex.RLock()
 		for _, t := range sc.Tasks {
 			if t.Id == shared.TaskId(taskId) {
-				task = &t
+				task = t
 			}
 		}
 		sc.RWmutex.RUnlock()
@@ -197,4 +200,135 @@ func KillTaskHandler(sc *ServerContext) http.HandlerFunc {
 
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+func SubmitTask(sc *ServerContext, task *ptask.Task) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	task.CancelFunc = cancel
+
+	sc.RWmutex.Lock()
+	sc.Tasks = append(sc.Tasks, task)
+	sc.RWmutex.Unlock()
+
+	log.Printf("Got task with id = %d and range = %s", task.Id, task.InputRange)
+
+	select {
+	case <-ctx.Done():
+		sc.RWmutex.Lock()
+		task.Status = ptask.KILLED
+		task.Result = []string{""}
+
+		err := SendTaskResult(sc, task)
+		sc.RWmutex.Unlock()
+		if err != nil {
+			return err // TODO make better
+		}
+		return nil
+
+	default:
+		sc.RWmutex.RLock()
+		input := task.InputRange
+		sc.RWmutex.RUnlock()
+
+		start, end, err := func(inputRange string) (string, string, error) {
+			parts := strings.Split(inputRange, "-")
+			if len(parts) != 2 {
+				return "", "", errors.New("invalid input range")
+			}
+			return parts[0], parts[1], nil
+		}(input)
+		if err != nil {
+			return err
+		}
+
+		incrementString := func(str string) string {
+			runes := []rune(str)
+			for i := len(runes) - 1; i >= 0; i-- {
+				if runes[i] < 'z' {
+					runes[i]++
+					return string(runes)
+				} else {
+					runes[i] = 'a'
+				}
+			}
+			return string(runes)
+		}
+
+		success := false
+		for input := start; strings.Compare(end, input) >= 0; input = incrementString(input) {
+			computedHash := md5.Sum([]byte(input))
+			// log.Println("input = "+input+"; computed hash = ", computedHash)
+			if hex.EncodeToString(computedHash[:]) == task.Hash {
+				sc.RWmutex.Lock()
+				task.Status = ptask.DONE_SUCCESS
+				task.Result = append(task.Result, input)
+				sc.RWmutex.Unlock()
+				success = true
+			}
+			if strings.Compare(end, input) == 0 {
+				break
+			}
+		}
+
+		if !success {
+			sc.RWmutex.Lock()
+			task.Status = ptask.DONE_FAILURE
+			task.Result = []string{""}
+			sc.RWmutex.Unlock()
+		}
+
+		sc.RWmutex.Lock()
+		err = SendTaskResult(sc, task)
+		sc.RWmutex.Unlock()
+		if err != nil {
+			// TODO make better
+			return err
+		}
+	}
+	return nil
+}
+
+func KillTask(sc *ServerContext, task *ptask.Task) error {
+	log.Printf("Got task to kill with id = %d and range = %s", task.Id, task.InputRange)
+
+	found := false
+	sc.RWmutex.RLock()
+	for _, t := range sc.Tasks {
+		if t.Id == shared.TaskId(task.Id) {
+			task = t
+			found = true
+			break
+		}
+	}
+	sc.RWmutex.RUnlock()
+
+	if !found {
+		return fmt.Errorf("error: task with id = %d not found", int(task.Id))
+	}
+
+	sc.RWmutex.RLock()
+	task.CancelFunc()
+	sc.RWmutex.RUnlock()
+
+	return nil
+}
+
+func SendTaskResult(sc *ServerContext, task *ptask.Task) error {
+	var task_json bytes.Buffer
+	if err := json.NewEncoder(&task_json).Encode(task); err != nil {
+		return err
+	}
+
+	return sc.Channel.Publish(
+		sc.ExchangeName,
+		"coordinator",
+		false,
+		false,
+		amqp.Publishing{
+			DeliveryMode: amqp.Persistent,
+			ContentType:  "application/json",
+			Priority:     0,
+			Body:         task_json.Bytes(),
+		},
+	)
 }

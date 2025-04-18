@@ -86,10 +86,15 @@ func RegisterNewWorkerHandler(coord *pcoordinator.Coordinator) http.HandlerFunc 
 		worker.Address = strings.Split(r.RemoteAddr, ":")[0] + ":" + workerStatus.Port
 		worker.LastHB = time.Now()
 		worker.Status = workerStatus.Status
-		coord.RegisterWorker(&worker)
+		worker.Id, err = coord.RegisterWorker(&worker)
+		if err != nil {
+			http.Error(w, "Cannot register worker", http.StatusInternalServerError)
+			return
+		}
 
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Worker registered successfully"))
+		json.NewEncoder(w).Encode(worker.Id)
 	}
 }
 

@@ -19,10 +19,24 @@ services:
       retries: 5
 
   rabbitmq:
-    image: --
+    image: rabbitmq:latest
     container_name: rabbitmq
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: secret
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"   # AMQP
+      - "15672:15672" # Management UI
     networks:
       - app-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   coordinator:
     build:
@@ -35,7 +49,11 @@ services:
       DB_USER: coordinator_user
       DB_PASSWORD: coordinator_password
       DB_NAME: coordinator_db
+      RABBITMQ_URL: "amqp://admin:secret@rabbitmq:5672/"
+      EXCHANGE_NAME: "tasks_direct"
     depends_on:
+      rabbitmq:
+        condition: service_healthy
       postgres:
         condition: service_healthy
     ports:
@@ -48,7 +66,9 @@ services:
       context: .
       dockerfile: worker_main/Dockerfile
     environment:
-      - COORDINATOR_ADDRESS=http://coordinator:8080
+      COORDINATOR_ADDR: "coordinator:8080"
+      RABBITMQ_URL: "amqp://admin:secret@rabbitmq:5672/"
+      EXCHANGE_NAME: "tasks_direct"
     depends_on:
       - coordinator
     networks:
@@ -61,3 +81,4 @@ networks:
 
 volumes:
   pgdata:
+  rabbitmq_data:

@@ -23,17 +23,19 @@ import (
 )
 
 type Coordinator struct {
-	db             *sql.DB
-	channel        *amqp.Channel
-	HeartbeatDelay time.Duration
-	DeadDelay      time.Duration
-	TaskTimeout    time.Duration
-	TaskRetries    int
+	db               *sql.DB
+	channel          *amqp.Channel
+	ExchangeName     string
+	taskResultsQueue amqp.Queue
+	HeartbeatDelay   time.Duration
+	DeadDelay        time.Duration
+	TaskTimeout      time.Duration
+	TaskRetries      int
 }
 
 /* Init Coordinator instance */
-func NewCoordinator(db *sql.DB, rabbitmq *amqp.Connection) (*Coordinator, error) {
-	log.Println("Coordinator was created")
+func NewCoordinator(db *sql.DB, rabbitmq *amqp.Connection, exchange_name string) (*Coordinator, error) {
+	defer log.Println("Coordinator was created")
 
 	channel, err := rabbitmq.Channel()
 	if err != nil {
@@ -41,7 +43,7 @@ func NewCoordinator(db *sql.DB, rabbitmq *amqp.Connection) (*Coordinator, error)
 	}
 
 	err = channel.ExchangeDeclare(
-		"exchange",
+		exchange_name,
 		"direct",
 		true,
 		false,
@@ -53,16 +55,75 @@ func NewCoordinator(db *sql.DB, rabbitmq *amqp.Connection) (*Coordinator, error)
 		return nil, err
 	}
 
-	return &Coordinator{
-		db:      db,
-		channel: channel,
-	}, nil
+	taskResultsQueue, err := channel.QueueDeclare(
+		"coordinator",
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		log.Fatalf("failed to declare rabbitmq queue: %v", err)
+	}
+
+	/* bind queue to exchange with worker ID as routing key */
+	err = channel.QueueBind(
+		"coordinator",
+		"coordinator", // binding key = worker ID
+		exchange_name,
+		false,
+		nil,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	messages, err := channel.Consume(
+		"coordinator",
+		"",
+		true,
+		false,
+		false,
+		false,
+		nil)
+	if err != nil {
+		log.Fatalf("failed to register a consumer: %v", err)
+	}
+
+	c := &Coordinator{
+		db:               db,
+		channel:          channel,
+		ExchangeName:     exchange_name,
+		taskResultsQueue: taskResultsQueue,
+	}
+
+	go func() {
+		for message := range messages {
+			var task ptask.Task
+			if err := json.Unmarshal(message.Body, &task); err != nil {
+				log.Printf("Failed to decode task: %v", err)
+				message.Nack(false, false) // Discard message
+				return
+			}
+
+			err = c.UpdateTask(&task)
+			if err != nil {
+				log.Printf("Invalid JSON payload: %v", err)
+				message.Nack(false, false) // Discard message
+				return
+			}
+		}
+	}()
+
+	return c, nil
 }
 
 func (c *Coordinator) PublishTask(worker *pworker.Worker, task_json bytes.Buffer) error {
+	log.Printf("publishing task to worker %d", worker.Id)
 	return c.channel.Publish(
-		"",
-		strconv.FormatUint(uint64(worker.Id), 10),
+		c.ExchangeName,
+		"worker_queue_"+strconv.FormatUint(uint64(worker.Id), 10),
 		false,
 		false,
 		amqp.Publishing{
@@ -70,14 +131,18 @@ func (c *Coordinator) PublishTask(worker *pworker.Worker, task_json bytes.Buffer
 			ContentType:  "application/json",
 			Priority:     0,
 			Body:         task_json.Bytes(),
+			Headers: amqp.Table{
+				"tag": "submit",
+			},
 		},
 	)
 }
 
 func (c *Coordinator) PublishKillingTask(worker *pworker.Worker, task_json bytes.Buffer) error {
+	log.Printf("publishing killing task to worker %d", worker.Id)
 	return c.channel.Publish(
-		"",
-		strconv.FormatUint(uint64(worker.Id), 10),
+		c.ExchangeName,
+		"worker_queue_"+strconv.FormatUint(uint64(worker.Id), 10),
 		false,
 		false,
 		amqp.Publishing{
@@ -85,6 +150,9 @@ func (c *Coordinator) PublishKillingTask(worker *pworker.Worker, task_json bytes
 			ContentType:  "application/json",
 			Priority:     9,
 			Body:         task_json.Bytes(),
+			Headers: amqp.Table{
+				"tag": "kill",
+			},
 		},
 	)
 }
@@ -263,10 +331,10 @@ func (c *Coordinator) Crack(request *prequest.UserRequest) (shared.UserRequestId
 }
 
 /* Register worker */
-func (c *Coordinator) RegisterWorker(worker *pworker.Worker) error {
+func (c *Coordinator) RegisterWorker(worker *pworker.Worker) (shared.WorkerId, error) {
 	_, err := database.GetWorkerByAddress(c.db, worker.Address)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
+		return 0, err
 	}
 
 	var id shared.WorkerId
@@ -280,7 +348,7 @@ func (c *Coordinator) RegisterWorker(worker *pworker.Worker) error {
 
 	log.Printf("RegisterWorker(worker) called: Id = %d; Address = %s; Status = %s; Error = %v;\n", id, worker.Address, worker.Status, err)
 
-	return err
+	return id, err
 }
 
 func (c *Coordinator) UpdateWorkerStatus(worker *pworker.Worker) error {
@@ -409,7 +477,10 @@ func (c *Coordinator) taskLaunch(worker *pworker.Worker, task *ptask.Task) (bool
 		return false, err
 	}
 
-	c.PublishTask(worker, buf)
+	err := c.PublishTask(worker, buf)
+	if err != nil {
+		return false, err
+	}
 
 	// resp, err := http.Post(
 	// 	"http://"+worker.Address+"/internal/api/worker/crack?taskId="+strconv.FormatUint(uint64(task.Id), 10),
