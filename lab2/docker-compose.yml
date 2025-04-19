@@ -1,14 +1,12 @@
 services:
-  postgres-primary:
+  postgres:
     image: postgres:16-alpine
-    container_name: postgres-primary
-    user: postgres
+    container_name: postgres
     environment:
       POSTGRES_USER: coordinator_user
       POSTGRES_PASSWORD: coordinator_password
       POSTGRES_DB: coordinator_db
-      POSTGRES_REPLICATION_USER: replicator
-      POSTGRES_REPLICATION_PASSWORD: replicatepass
+      POSTGRESQL_MAX_CONNECTIONS: "200"
     volumes:
       - pgdata_primary:/var/lib/postgresql/data
     ports:
@@ -20,118 +18,63 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    command: >
-      -c wal_level=replica
-      -c max_wal_senders=10
-      -c max_replication_slots=10
-      -c hot_standby=on
-
-  postgres-replica:
-    image: postgres:16-alpine
-    container_name: postgres-replica
-    user: postgres
+  
+  rabbitmq:
+    image: rabbitmq:latest
+    container_name: rabbitmq
+    hostname: rabbitmq
     environment:
-      POSTGRES_USER: coordinator_user
-      POSTGRES_PASSWORD: coordinator_password
-      POSTGRES_DB: coordinator_db
-      POSTGRES_PORT: 5433 
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: secret
     volumes:
-      - pgdata_replica:/var/lib/postgresql/data
-    depends_on:
-      postgres-primary:
-        condition: service_healthy
+      - rabbitmq_data:/var/lib/rabbitmq
     ports:
-      - "5433:5433"
+      - "5672:5672"   # AMQP
+      - "15672:15672" # Management UI
     networks:
       - app-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U coordinator_user -d coordinator_db && pg_is_in_recovery()"]
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 15
-      start_period: 30s
-    command: >
-      bash -c '
-        # Wait for primary to be ready
-        until pg_isready -h postgres-primary -p 5432 -U coordinator_user -d coordinator_db; do
-          echo "Waiting for primary to be ready..."
-          sleep 2
-        done
-        
-        # Clean replica data directory if it exists
-        if [ -f /var/lib/postgresql/data/postmaster.pid ]; then
-          rm -rf /var/lib/postgresql/data/*
-        fi
-        
-        # Perform base backup
-        pg_basebackup -h postgres-primary -p 5432 -U replicator -D /var/lib/postgresql/data -P -R -X stream -C -S replica_slot
-        
-        # Start PostgreSQL
-        exec postgres -c port=5433 -c hot_standby=on
-      '
-# -c port=5433 
-# -c wal_level=replica
-# -c hot_standby=on
-# -c primary_conninfo='host=postgres-primary port=5432 user=replicator password=replicatepass application_name=replica1 sslmode=prefer sslcompression=0 gssencmode=prefer krbsrvname=postgres target_session_attrs=any'
-  
-  # rabbitmq:
-  #   image: rabbitmq:latest
-  #   container_name: rabbitmq
-  #   hostname: rabbitmq
-  #   environment:
-  #     RABBITMQ_DEFAULT_USER: admin
-  #     RABBITMQ_DEFAULT_PASS: secret
-  #   volumes:
-  #     - rabbitmq_data:/var/lib/rabbitmq
-  #   ports:
-  #     - "5672:5672"   # AMQP
-  #     - "15672:15672" # Management UI
-  #   networks:
-  #     - app-network
-  #   healthcheck:
-  #     test: ["CMD", "rabbitmq-diagnostics", "ping"]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 5
+      retries: 5
 
-  # coordinator:
-  #   build:
-  #     context: .
-  #     dockerfile: coordinator_main/Dockerfile
-  #   container_name: coordinator
-  #   environment:
-  #     DB_HOST: postgres
-  #     DB_PORT: 5432
-  #     DB_USER: coordinator_user
-  #     DB_PASSWORD: coordinator_password
-  #     DB_NAME: coordinator_db
-  #     RABBITMQ_URL: "amqp://admin:secret@rabbitmq:5672/"
-  #     EXCHANGE_NAME: "tasks_direct"
-  #   depends_on:
-  #     rabbitmq:
-  #       condition: service_healthy
-  #     postgres-primary:
-  #       condition: service_healthy
-  #     # postgres-replica:
-  #     #   condition: service_healthy
-  #   ports:
-  #     - "8080:8080"
-  #   networks:
-  #     - app-network
+  coordinator:
+    build:
+      context: .
+      dockerfile: coordinator_main/Dockerfile
+    container_name: coordinator
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: coordinator_user
+      DB_PASSWORD: coordinator_password
+      DB_NAME: coordinator_db
+      RABBITMQ_URL: "amqp://admin:secret@rabbitmq:5672/"
+      EXCHANGE_NAME: "tasks_direct"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    networks:
+      - app-network
 
-  # worker:
-  #   build:
-  #     context: .
-  #     dockerfile: worker_main/Dockerfile
-  #   environment:
-  #     COORDINATOR_ADDR: "coordinator:8080"
-  #     RABBITMQ_URL: "amqp://admin:secret@rabbitmq:5672/"
-  #     EXCHANGE_NAME: "tasks_direct"
-  #   depends_on:
-  #     - coordinator
-  #   networks:
-  #     - app-network
-  #   scale: 2
+  worker:
+    build:
+      context: .
+      dockerfile: worker_main/Dockerfile
+    environment:
+      COORDINATOR_ADDR: "coordinator:8080"
+      RABBITMQ_URL: "amqp://admin:secret@rabbitmq:5672/"
+      EXCHANGE_NAME: "tasks_direct"
+    depends_on:
+      - coordinator
+    networks:
+      - app-network
+    scale: 2
 
 networks:
   app-network:
@@ -139,5 +82,4 @@ networks:
 
 volumes:
   pgdata_primary:
-  pgdata_replica:
-  # rabbitmq_data:
+  rabbitmq_data:

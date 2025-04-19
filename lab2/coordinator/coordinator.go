@@ -369,10 +369,112 @@ func (c *Coordinator) UpdateWorkerStatusAndLastHB(worker *pworker.Worker) error 
 
 func (c *Coordinator) DeleteWorker(worker *pworker.Worker) error {
 	err := database.DeleteWorker(c.db, worker)
+	if err != nil {
+		log.Printf("Failed to delete worker %d: %v", worker.Id, err)
+		return err
+	}
 
-	log.Printf("DeleteWorker(worker) called: Id = %d; Address = %s; Status = %s; Error = %v\n", worker.Id, worker.Address, worker.Status, err)
+	workerQueueName := "worker_queue_" + strconv.FormatUint(uint64(worker.Id), 10)
+	workerQueue, err := c.channel.QueueDeclarePassive(
+		workerQueueName,
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		log.Printf("Failed to inspect queue %s: %v", workerQueue.Name, err)
+		return nil
+	}
 
-	return err
+	/* If dead worker's queue contains some messages */
+	if workerQueue.Messages == 0 {
+		return nil
+	}
+
+	return c.reassignTasks(workerQueueName)
+}
+
+func (c *Coordinator) reassignTasks(deadQueueName string) error {
+	msgs, err := c.channel.Consume(
+		deadQueueName,
+		"",
+		false,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		log.Printf("Failed to consume from dead worker's queue: %v", err)
+		return err
+	}
+
+get_workers:
+	workers, err := database.GetAllAliveWorkers(c.db)
+	if err != nil {
+		log.Printf("ERROR cannot get alive workers\n")
+		time.Sleep(c.DeadDelay)
+		goto get_workers
+	}
+	numWorkers := len(workers)
+	if numWorkers == 0 {
+		log.Printf("WARNING no alive workers\n")
+		time.Sleep(c.DeadDelay)
+		goto get_workers
+	}
+
+	for msg := range msgs {
+		reassigned := false
+		for _, worker := range workers {
+			launched, err := c.reassignTask(worker, msg)
+			if launched {
+				reassigned = true
+				break
+			}
+			log.Printf("ERROR cannot assign task to worker %d: %v\n", worker.Id, err)
+		}
+
+		if !reassigned {
+			msg.Nack(false, true)
+			time.Sleep(c.DeadDelay)
+			goto get_workers
+		}
+
+		msg.Ack(false)
+	}
+	return nil
+}
+
+func (c *Coordinator) reassignTask(worker *pworker.Worker, msg amqp.Delivery) (bool, error) {
+	err := c.channel.Publish(
+		c.ExchangeName,
+		"worker_queue_"+strconv.FormatUint(uint64(worker.Id), 10),
+		false,
+		false,
+		amqp.Publishing{
+			DeliveryMode: amqp.Persistent,
+			Priority:     0,
+			Body:         msg.Body,
+			Headers:      msg.Headers,
+		},
+	)
+	if err != nil {
+		return false, err
+	}
+
+	var task ptask.Task
+	err = json.Unmarshal(msg.Body, &task)
+	if err != nil {
+		return false, fmt.Errorf("JSON unmarshal error: %w", err)
+	}
+
+	task.WorkerId = worker.Id
+	if err := database.UpdateTaskWorkerId(c.db, &task); err != nil {
+		return false, fmt.Errorf("database update failed: %w", err)
+	}
+	return true, nil
 }
 
 /* Send heartbeat to workers

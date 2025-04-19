@@ -70,7 +70,7 @@ func main() {
 	/* Connect to database*/
 	db, err := database.Initdb(context.DbConnStr)
 	if err != nil {
-		log.Fatalf("cannot connect to database: %s\n", err)
+		log.Fatalf("cannot connect to database with connStr \"%s\": %s\n", context.DbConnStr, err)
 	}
 
 	/* Connect to rabbitmq */
