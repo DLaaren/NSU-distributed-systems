@@ -4,6 +4,8 @@ WORKDIR /app
 
 COPY . .
 
+ENV GOPROXY=https://goproxy.io,direct
+
 RUN go mod tidy
  
 RUN go build -gcflags="all=-N -l" -o bin/coordinator coordinator_main/*.go

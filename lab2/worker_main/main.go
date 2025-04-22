@@ -29,6 +29,7 @@ type ServerContext struct {
 	MyWorkerId         shared.WorkerId
 	RetryConnectDelay  time.Duration
 	MaxRetries         int
+	MaxParallelTasks   int
 	Status             pworker.WorkerStatus
 	Tasks              []*ptask.Task
 	RWmutex            sync.RWMutex
@@ -38,6 +39,7 @@ type Config struct {
 	Port              string        `yaml:"port"`
 	RetryConnectDelay time.Duration `yaml:"retry_connect_delay"`
 	MaxRetries        int           `yaml:"max_retries"`
+	MaxParallelTasks  int           `yaml:"max_parallel_tasks"`
 }
 
 var server_context ServerContext
@@ -109,6 +111,7 @@ func main() {
 	server_context.ExchangeName = os.Getenv("EXCHANGE_NAME")
 	server_context.RetryConnectDelay = config.RetryConnectDelay
 	server_context.MaxRetries = config.MaxRetries
+	server_context.MaxParallelTasks = config.MaxParallelTasks
 
 	/* Connect to rabbitmq */
 	rabbitmq, err := amqp.Dial(server_context.RabbitMqConnStr)
@@ -155,6 +158,15 @@ func main() {
 		log.Fatalf("failed to declare rabbitmq queue: %v", err)
 	}
 
+	err = channel.Qos(
+		server_context.MaxParallelTasks,
+		0,     // the total size of unack msgs per consumer
+		false, // whether th QoS limits applies to all comsumers within the channel or only to this one
+	)
+	if err != nil {
+		log.Fatalf("Failed to set QoS: %v", err)
+	}
+
 	/* bind queue to exchange with worker ID as routing key */
 	err = channel.QueueBind(
 		server_context.TasksQueue.Name,
@@ -170,7 +182,7 @@ func main() {
 	messages, err := channel.Consume(
 		server_context.TasksQueue.Name,
 		"",
-		true,
+		false,
 		false,
 		false,
 		false,
@@ -205,23 +217,26 @@ func main() {
 				continue
 			}
 
-			go func() {
-				var task ptask.Task
-				if err := json.Unmarshal(message.Body, &task); err != nil {
-					log.Printf("Failed to decode task: %v", err)
-					message.Nack(false, false) // Discard message
-					return
-				}
+			var task ptask.Task
+			if err := json.Unmarshal(message.Body, &task); err != nil {
+				log.Printf("Failed to decode task: %v", err)
+				message.Nack(false, false) // Discard message
+				return
+			}
 
-				switch tagStr {
-				case "submit":
+			switch tagStr {
+			case "submit":
+				go func() {
 					err := SubmitTask(&server_context, &task)
 					if err != nil {
 						log.Printf("Failed to submit task: %v", err)
 						message.Nack(false, true) // Requeue on temporary failure
 						return
 					}
-				case "kill":
+					message.Ack(false)
+				}()
+			case "kill":
+				go func() {
 					err := KillTask(&server_context, &task)
 					if err != nil {
 						log.Printf("Failed to kill task: %v", err)
@@ -229,12 +244,13 @@ func main() {
 						message.Nack(false, false)
 						return
 					}
-				default:
-					log.Printf("Unknown message tag: %s", tagStr)
-					message.Nack(false, false) // Discard unknown message types
-					return
-				}
-			}()
+					message.Ack(false)
+				}()
+			default:
+				log.Printf("Unknown message tag: %s", tagStr)
+				message.Nack(false, false) // Discard unknown message types
+				return
+			}
 		}
 	}()
 

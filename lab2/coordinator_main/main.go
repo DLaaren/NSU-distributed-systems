@@ -15,19 +15,21 @@ import (
 )
 
 type ServerContext struct {
-	Port            string
-	Coordinator     *pcoordinator.Coordinator
-	DbConnStr       string
-	RabbitMqConnStr string
-	ExchangeName    string
+	Port             string
+	Coordinator      *pcoordinator.Coordinator
+	DbConnStr        string
+	RabbitMqConnStr  string
+	ExchangeName     string
+	MaxParallelTasks int
 }
 
 type Config struct {
-	Port           string        `yaml:"port"`
-	HeartbeatDelay time.Duration `yaml:"heartbeat_delay"`
-	DeadDelay      time.Duration `yaml:"dead_delay"`
-	TaskTimeout    time.Duration `yaml:"task_timeout"`
-	TaskRetries    int           `yaml:"task_retries"`
+	Port             string        `yaml:"port"`
+	HeartbeatDelay   time.Duration `yaml:"heartbeat_delay"`
+	DeadDelay        time.Duration `yaml:"dead_delay"`
+	TaskTimeout      time.Duration `yaml:"task_timeout"`
+	TaskRetries      int           `yaml:"task_retries"`
+	MaxParallelTasks int           `yaml:"max_parallel_tasks"`
 }
 
 var context ServerContext
@@ -66,6 +68,7 @@ func main() {
 		" sslmode=disable"
 	context.RabbitMqConnStr = os.Getenv("RABBITMQ_URL")
 	context.ExchangeName = os.Getenv("EXCHANGE_NAME")
+	context.MaxParallelTasks = config.MaxParallelTasks
 
 	/* Connect to database*/
 	db, err := database.Initdb(context.DbConnStr)
@@ -80,7 +83,7 @@ func main() {
 	}
 
 	/* Create coordinator */
-	context.Coordinator, err = pcoordinator.NewCoordinator(db, rabbitmq, context.ExchangeName)
+	context.Coordinator, err = pcoordinator.NewCoordinator(db, rabbitmq, context.ExchangeName, context.MaxParallelTasks)
 	if err != nil {
 		log.Fatalf("cannot create coordinator: %s\n", err)
 	}
@@ -88,6 +91,11 @@ func main() {
 	context.Coordinator.DeadDelay = config.DeadDelay
 	context.Coordinator.TaskTimeout = config.TaskTimeout
 	context.Coordinator.TaskRetries = config.TaskRetries
+
+	err = context.Coordinator.RecoverAfterCrash()
+	if err != nil {
+		log.Fatalf("cannot recover after crash: %s\n", err)
+	}
 
 	/* define handlers */
 	http.HandleFunc("/api/hash/status", GetRequestStatusHandler(context.Coordinator))

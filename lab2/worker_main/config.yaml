@@ -1,3 +1,4 @@
 port: 8081
+max_parallel_tasks: 4
 retry_connect_delay: 1m
 max_retries: 3

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"lab2/shared"
 	"lab2/task"
@@ -221,7 +222,7 @@ func SubmitTask(sc *ServerContext, task *ptask.Task) error {
 		err := SendTaskResult(sc, task)
 		sc.RWmutex.Unlock()
 		if err != nil {
-			return err // TODO make better
+			return err
 		}
 		return nil
 
@@ -281,7 +282,6 @@ func SubmitTask(sc *ServerContext, task *ptask.Task) error {
 		err = SendTaskResult(sc, task)
 		sc.RWmutex.Unlock()
 		if err != nil {
-			// TODO make better
 			return err
 		}
 	}
@@ -314,6 +314,7 @@ func KillTask(sc *ServerContext, task *ptask.Task) error {
 }
 
 func SendTaskResult(sc *ServerContext, task *ptask.Task) error {
+	time.Sleep(1 * time.Minute)
 	var task_json bytes.Buffer
 	if err := json.NewEncoder(&task_json).Encode(task); err != nil {
 		return err

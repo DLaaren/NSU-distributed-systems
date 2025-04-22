@@ -34,7 +34,7 @@ type Coordinator struct {
 }
 
 /* Init Coordinator instance */
-func NewCoordinator(db *sql.DB, rabbitmq *amqp.Connection, exchange_name string) (*Coordinator, error) {
+func NewCoordinator(db *sql.DB, rabbitmq *amqp.Connection, exchange_name string, max_parallel_msgs int) (*Coordinator, error) {
 	defer log.Println("Coordinator was created")
 
 	channel, err := rabbitmq.Channel()
@@ -67,6 +67,15 @@ func NewCoordinator(db *sql.DB, rabbitmq *amqp.Connection, exchange_name string)
 		log.Fatalf("failed to declare rabbitmq queue: %v", err)
 	}
 
+	err = channel.Qos(
+		max_parallel_msgs,
+		0,     // the total size of unack msgs per consumer
+		false, // whether th QoS limits applies to all comsumers within the channel or only to this one
+	)
+	if err != nil {
+		log.Fatalf("Failed to set QoS: %v", err)
+	}
+
 	/* bind queue to exchange with worker ID as routing key */
 	err = channel.QueueBind(
 		"coordinator",
@@ -82,7 +91,7 @@ func NewCoordinator(db *sql.DB, rabbitmq *amqp.Connection, exchange_name string)
 	messages, err := channel.Consume(
 		"coordinator",
 		"",
-		true,
+		false,
 		false,
 		false,
 		false,
@@ -113,6 +122,7 @@ func NewCoordinator(db *sql.DB, rabbitmq *amqp.Connection, exchange_name string)
 				message.Nack(false, false) // Discard message
 				return
 			}
+			message.Ack(false)
 		}
 	}()
 
@@ -625,4 +635,26 @@ func (c *Coordinator) taskKill(worker *pworker.Worker, task *ptask.Task) {
 	// }
 
 	log.Printf("Successfully killed task with id = %d from request with id = %d to worker %d with address = %s", task.Id, task.RequestId, worker.Id, worker.Address)
+}
+
+func (c *Coordinator) RecoverAfterCrash() error {
+	requests, err := database.GetUserRequestProcessing(c.db)
+	if err != nil {
+		return fmt.Errorf("failed to get pending requests: %w", err)
+	}
+
+	if len(requests) == 0 {
+		return nil
+	}
+
+	for _, request := range requests {
+		/* это тупо, но я хочу пойти спать....*/
+		err = database.DeleteTasksByUserRequestId(c.db, request.Id)
+		if err != nil {
+			return fmt.Errorf("failed to delete pending tasks: %w", err)
+		}
+		go c.assignTasks(request)
+	}
+
+	return nil
 }

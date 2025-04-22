@@ -179,3 +179,13 @@ func CountCompleteTasks(db *sql.DB, requestId shared.UserRequestId) (bool, error
 
 	return allCompleted, err
 }
+
+func DeleteTasksByUserRequestId(db *sql.DB, requestId shared.UserRequestId) error {
+	err := db.QueryRow(
+		`DELETE FROM tasks
+		WHERE user_request_id = $1`,
+		requestId).
+		Err()
+
+	return err
+}

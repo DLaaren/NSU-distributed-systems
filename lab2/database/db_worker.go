@@ -73,6 +73,8 @@ func GetAllWorkers(db *sql.DB) ([]*pworker.Worker, error) {
 		return nil, err
 	}
 
+	defer rows.Close()
+
 	var workers []*pworker.Worker
 	for rows.Next() {
 		var worker pworker.Worker
@@ -105,6 +107,8 @@ func GetAllAliveWorkers(db *sql.DB) ([]*pworker.Worker, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	defer rows.Close()
 
 	var workers []*pworker.Worker
 	for rows.Next() {

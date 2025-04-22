@@ -78,3 +78,39 @@ func UpdateRequestStatusAndResult(db *sql.DB, id shared.UserRequestId, status pr
 
 	return err
 }
+
+func GetUserRequestProcessing(db *sql.DB) ([]*prequest.UserRequest, error) {
+	rows, err := db.Query(`
+		SELECT *
+		FROM user_requests
+		WHERE status = 'PROCESSING'
+	`)
+	if err != nil {
+		return nil, err
+	}
+
+	defer rows.Close()
+
+	var requests []*prequest.UserRequest
+	for rows.Next() {
+		var request prequest.UserRequest
+		err = rows.Scan(
+			&request.Id,
+			&request.Hash,
+			&request.MaxLength,
+			&request.Status,
+			&request.Result,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		requests = append(requests, &request)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return requests, err
+}
