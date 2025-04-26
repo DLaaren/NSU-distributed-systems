@@ -99,7 +99,7 @@ func GetUserRequestProcessing(db *sql.DB) ([]*prequest.UserRequest, error) {
 			&request.Hash,
 			&request.MaxLength,
 			&request.Status,
-			&request.Result,
+			pq.Array(&request.Result),
 		)
 		if err != nil {
 			return nil, err

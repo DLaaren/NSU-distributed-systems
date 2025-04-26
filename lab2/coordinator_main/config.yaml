@@ -3,4 +3,3 @@ heartbeat_delay: 1s
 dead_delay: 2m
 task_timeout: 20m
 task_retries: 3
-max_parallel_tasks: 4
