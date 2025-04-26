@@ -4,7 +4,7 @@ CONTAINER_NAME="rabbitmq"
 
 docker compose stop "$CONTAINER_NAME"
 
-sleep 10;
+sleep 5;
 
 docker compose start "$CONTAINER_NAME"
 

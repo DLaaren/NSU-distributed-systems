@@ -26,7 +26,7 @@ func GetWorkerStatusHandler(sc *ServerContext) http.HandlerFunc {
 		sc.RWmutex.RLock()
 		response := pworker.WorkerStatusResponse{
 			Status: sc.Status,
-			Port:   sc.Port,
+			Port:   sc.Config.Port,
 		}
 		sc.RWmutex.RUnlock()
 
@@ -218,9 +218,10 @@ func SubmitTask(sc *ServerContext, task *ptask.Task) error {
 		sc.RWmutex.Lock()
 		task.Status = ptask.KILLED
 		task.Result = []string{""}
+		sc.RWmutex.Unlock()
 
 		err := SendTaskResult(sc, task)
-		sc.RWmutex.Unlock()
+
 		if err != nil {
 			return err
 		}
@@ -278,9 +279,7 @@ func SubmitTask(sc *ServerContext, task *ptask.Task) error {
 			sc.RWmutex.Unlock()
 		}
 
-		sc.RWmutex.Lock()
 		err = SendTaskResult(sc, task)
-		sc.RWmutex.Unlock()
 		if err != nil {
 			return err
 		}
@@ -314,22 +313,42 @@ func KillTask(sc *ServerContext, task *ptask.Task) error {
 }
 
 func SendTaskResult(sc *ServerContext, task *ptask.Task) error {
-	time.Sleep(1 * time.Minute)
+	// TODO for test purposes
+	time.Sleep(time.Second * 3)
 	var task_json bytes.Buffer
 	if err := json.NewEncoder(&task_json).Encode(task); err != nil {
 		return err
 	}
 
-	return sc.Channel.Publish(
-		sc.ExchangeName,
-		"coordinator",
-		false,
-		false,
-		amqp.Publishing{
-			DeliveryMode: amqp.Persistent,
-			ContentType:  "application/json",
-			Priority:     0,
-			Body:         task_json.Bytes(),
-		},
-	)
+	log.Printf("sending task %d result to coordinator", task.Id)
+
+	for {
+		sc.RWmutex.RLock()
+		ch := sc.RabbitMQ.Channel
+		sc.RWmutex.RUnlock()
+
+		if ch == nil || ch.IsClosed() {
+			return fmt.Errorf("channel is not available")
+		}
+
+		err := ch.Publish(
+			sc.ExchangeName,
+			"coordinator",
+			false,
+			false,
+			amqp.Publishing{
+				DeliveryMode: amqp.Persistent,
+				ContentType:  "application/json",
+				Priority:     0,
+				Body:         task_json.Bytes(),
+			},
+		)
+
+		if err == nil {
+			return nil
+		}
+
+		log.Printf("Failed to send task result, retrying: %v", err)
+		time.Sleep(worker_context.Config.RetryConnectDelay)
+	}
 }

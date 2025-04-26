@@ -17,127 +17,204 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"lab2/database"
+	"lab2/rabbitmq"
 	"lab2/request"
 	"lab2/shared"
 	"lab2/task"
 	"lab2/worker"
 )
 
-type Coordinator struct {
-	db             *sql.DB
-	ExchangeName   string
-	Channel        *amqp.Channel
-	Messages       <-chan amqp.Delivery
+type CoordConfig struct {
 	HeartbeatDelay time.Duration
 	DeadDelay      time.Duration
 	TaskTimeout    time.Duration
 	TaskRetries    int
-	RWmutex        sync.RWMutex
+}
+
+type Coordinator struct {
+	db       *sql.DB
+	rabbitmq *prabbitmq.RabbitMQManager
+	config   CoordConfig
+	RWmutex  sync.RWMutex
 }
 
 /* Init Coordinator instance */
-func NewCoordinator(db *sql.DB) (*Coordinator, error) {
-	defer log.Println("Coordinator was created")
+func NewCoordinator(db *sql.DB, rabbitmq *prabbitmq.RabbitMQManager,
+	hbDelay time.Duration, deadDelay time.Duration,
+	taskTimeout time.Duration, taskRetries int) *Coordinator {
+	defer log.Printf("Coordinator was created; HbDelay = %d; deadDelay = %d", hbDelay, deadDelay)
 
 	c := &Coordinator{
-		db: db,
+		db:       db,
+		rabbitmq: rabbitmq,
+		config: CoordConfig{
+			HeartbeatDelay: hbDelay,
+			DeadDelay:      deadDelay,
+			TaskTimeout:    taskTimeout,
+			TaskRetries:    taskRetries,
+		},
 	}
 
-	return c, nil
+	return c
 }
 
-func (c *Coordinator) WaitForResults() {
-	go func() {
-		for {
-			c.RWmutex.RLock()
-			messages := c.Messages
-			c.RWmutex.RUnlock()
+func (c *Coordinator) Start() {
+	go c.consumeTaskResults()
 
-			for message := range messages {
-				var task ptask.Task
-				if err := json.Unmarshal(message.Body, &task); err != nil {
-					isConnErr := checkConnectionError(err)
-					if isConnErr {
-						log.Printf("Waiting for reconnection to RabbitMq")
-						message.Nack(false, true)
-						break
-					}
+	go c.checkWorkers()
+}
 
-					log.Printf("Failed to decode task: %v", err)
-					message.Nack(false, false) // Discard message
-					continue
-				}
+func (c *Coordinator) consumeTaskResults() {
+	for {
+		ch, err := c.rabbitmq.GetChannel()
+		if err != nil {
+			log.Printf("Failed to get channel, retrying: %v", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
 
-				err := c.UpdateTask(&task)
-				if err != nil {
-					isConnErr := checkConnectionError(err)
-					if isConnErr {
-						log.Printf("Waiting for reconnection to RabbitMq")
-						message.Nack(false, true)
-						break
-					}
+		_, err = ch.QueueDeclare(
+			"coordinator",
+			true,
+			false,
+			false,
+			false,
+			nil,
+		)
+		if err != nil {
+			log.Printf("Failed to declare queue, retrying: %v", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
 
-					log.Printf("Invalid JSON payload: %v", err)
-					message.Nack(false, false) // Discard message
-					continue
-				}
-				message.Ack(false)
+		err = ch.Qos(
+			1,
+			0,     // the total size of unack msgs per consumer
+			false, // whether th QoS limits applies to all comsumers within the channel or only to this one
+		)
+		if err != nil {
+			log.Printf("Failed to declare queue, retrying: %v", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		/* bind queue to exchange with worker ID as routing key */
+		err = ch.QueueBind(
+			"coordinator",
+			"coordinator", // binding key = worker ID
+			c.rabbitmq.ExchangeName,
+			false,
+			nil,
+		)
+		if err != nil {
+			log.Printf("Failed to declare queue, retrying: %v", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		messages, err := ch.Consume(
+			"coordinator",
+			"",
+			false,
+			false,
+			false,
+			false,
+			nil)
+		if err != nil {
+			log.Printf("Failed to declare queue, retrying: %v", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		for message := range messages {
+			var task ptask.Task
+			if err := json.Unmarshal(message.Body, &task); err != nil {
+				log.Printf("Failed to decode task: %v", err)
+				message.Nack(false, false)
+				continue
 			}
-		}
-	}()
-}
 
-func checkConnectionError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	if amqpErr, ok := err.(*amqp.Error); ok {
-		if amqpErr.Code == amqp.ChannelError {
-			log.Printf("RabbitMQ Channel/connection error (code %d): %v", amqpErr.Code, amqpErr.Reason)
-			return true
+			err := c.UpdateTask(&task)
+			if err != nil {
+				log.Printf("Invalid JSON payload: %v", err)
+				message.Nack(false, false)
+				continue
+			}
+			message.Ack(false)
 		}
 	}
-
-	return false
 }
 
 func (c *Coordinator) PublishTask(worker *pworker.Worker, task_json bytes.Buffer) error {
 	log.Printf("publishing task to worker %d", worker.Id)
-	return c.Channel.Publish(
-		c.ExchangeName,
-		"worker_queue_"+strconv.FormatUint(uint64(worker.Id), 10),
-		false,
-		false,
-		amqp.Publishing{
-			DeliveryMode: amqp.Persistent,
-			ContentType:  "application/json",
-			Priority:     0,
-			Body:         task_json.Bytes(),
-			Headers: amqp.Table{
-				"tag": "submit",
+
+	for {
+		ch, err := c.rabbitmq.GetChannel()
+		if err != nil {
+			log.Printf("Failed to get channel, retrying: %v", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		err = ch.Publish(
+			c.rabbitmq.ExchangeName,
+			"worker_queue_"+strconv.FormatUint(uint64(worker.Id), 10),
+			false,
+			false,
+			amqp.Publishing{
+				DeliveryMode: amqp.Persistent,
+				ContentType:  "application/json",
+				Priority:     0,
+				Body:         task_json.Bytes(),
+				Headers: amqp.Table{
+					"tag": "submit",
+				},
 			},
-		},
-	)
+		)
+
+		if err == nil {
+			return nil
+		}
+
+		log.Printf("Failed to publish message, retrying: %v", err)
+		time.Sleep(2 * time.Second)
+	}
 }
 
 func (c *Coordinator) PublishKillingTask(worker *pworker.Worker, task_json bytes.Buffer) error {
 	log.Printf("publishing killing task to worker %d", worker.Id)
-	return c.Channel.Publish(
-		c.ExchangeName,
-		"worker_queue_"+strconv.FormatUint(uint64(worker.Id), 10),
-		false,
-		false,
-		amqp.Publishing{
-			DeliveryMode: amqp.Persistent,
-			ContentType:  "application/json",
-			Priority:     9,
-			Body:         task_json.Bytes(),
-			Headers: amqp.Table{
-				"tag": "kill",
+
+	for {
+		ch, err := c.rabbitmq.GetChannel()
+		if err != nil {
+			log.Printf("Failed to get channel, retrying: %v", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		err = ch.Publish(
+			c.rabbitmq.ExchangeName,
+			"worker_queue_"+strconv.FormatUint(uint64(worker.Id), 10),
+			false,
+			false,
+			amqp.Publishing{
+				DeliveryMode: amqp.Persistent,
+				ContentType:  "application/json",
+				Priority:     9,
+				Body:         task_json.Bytes(),
+				Headers: amqp.Table{
+					"tag": "kill",
+				},
 			},
-		},
-	)
+		)
+
+		if err == nil {
+			return nil
+		}
+
+		log.Printf("Failed to publish message, retrying: %v", err)
+		time.Sleep(2 * time.Second)
+	}
 }
 
 func (c *Coordinator) GetUserRequestStatus(requestId shared.UserRequestId) prequest.UserStatusResponse {
@@ -232,14 +309,14 @@ get_workers:
 	}
 	numWorkers := len(workers)
 	if numWorkers == 0 {
-		log.Printf("WARNING no alive workers\n")
-		time.Sleep(c.DeadDelay)
+		log.Printf("assign tasks: WARNING no alive workers\n")
+		time.Sleep(c.config.DeadDelay)
 		goto get_workers
 	}
 	crack_len := request.MaxLength
 	chunks := splitRange(strings.Repeat("a", int(crack_len)), strings.Repeat("z", int(crack_len)), numWorkers)
 
-	ctx, cancel := context.WithTimeout(context.Background(), c.TaskTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), c.config.TaskTimeout)
 	defer cancel()
 
 	go func(c *Coordinator, request *prequest.UserRequest) {
@@ -272,7 +349,7 @@ get_workers:
 				launched, err := c.taskLaunch(worker, &task)
 				if !launched || err != nil {
 					log.Printf("ERROR cannot assign task: %v\n", err)
-					if retry >= c.TaskRetries {
+					if retry >= c.config.TaskRetries {
 						c.setRequestError(request)
 						return
 					}
@@ -337,15 +414,11 @@ func (c *Coordinator) RegisterWorker(worker *pworker.Worker) (shared.WorkerId, e
 func (c *Coordinator) UpdateWorkerStatus(worker *pworker.Worker) error {
 	err := database.UpdateWorkerStatus(c.db, worker)
 
-	log.Printf("UpdateWorkerStatus(worker) called: Id = %d; Address = %s; Status = %s; Error = %v\n", worker.Id, worker.Address, worker.Status, err)
-
 	return err
 }
 
 func (c *Coordinator) UpdateWorkerStatusAndLastHB(worker *pworker.Worker) error {
 	_, err := database.UpdateWorker(c.db, worker)
-
-	// log.Printf("UpdateWorkerStatusAndLastHB(worker, time) called: Id = %d; Address = %s Error = %v\n", id, worker.Address, err)
 
 	return err
 }
@@ -358,7 +431,7 @@ func (c *Coordinator) DeleteWorker(worker *pworker.Worker) error {
 	}
 
 	workerQueueName := "worker_queue_" + strconv.FormatUint(uint64(worker.Id), 10)
-	workerQueue, err := c.Channel.QueueDeclarePassive(
+	workerQueue, err := c.rabbitmq.Channel.QueueDeclarePassive(
 		workerQueueName,
 		true,
 		false,
@@ -380,7 +453,7 @@ func (c *Coordinator) DeleteWorker(worker *pworker.Worker) error {
 }
 
 func (c *Coordinator) reassignTasks(deadQueueName string) error {
-	msgs, err := c.Channel.Consume(
+	msgs, err := c.rabbitmq.Channel.Consume(
 		deadQueueName,
 		"",
 		false,
@@ -398,13 +471,13 @@ get_workers:
 	workers, err := database.GetAllAliveWorkers(c.db)
 	if err != nil {
 		log.Printf("ERROR cannot get alive workers\n")
-		time.Sleep(c.DeadDelay)
+		time.Sleep(c.config.DeadDelay)
 		goto get_workers
 	}
 	numWorkers := len(workers)
 	if numWorkers == 0 {
-		log.Printf("WARNING no alive workers\n")
-		time.Sleep(c.DeadDelay)
+		log.Printf("reassing tasks: WARNING no alive workers\n")
+		time.Sleep(c.config.DeadDelay)
 		goto get_workers
 	}
 
@@ -421,7 +494,7 @@ get_workers:
 
 		if !reassigned {
 			msg.Nack(false, true)
-			time.Sleep(c.DeadDelay)
+			time.Sleep(c.config.DeadDelay)
 			goto get_workers
 		}
 
@@ -431,8 +504,8 @@ get_workers:
 }
 
 func (c *Coordinator) reassignTask(worker *pworker.Worker, msg amqp.Delivery) (bool, error) {
-	err := c.Channel.Publish(
-		c.ExchangeName,
+	err := c.rabbitmq.Channel.Publish(
+		c.rabbitmq.ExchangeName,
 		"worker_queue_"+strconv.FormatUint(uint64(worker.Id), 10),
 		false,
 		false,
@@ -463,8 +536,8 @@ func (c *Coordinator) reassignTask(worker *pworker.Worker, msg amqp.Delivery) (b
 /* Send heartbeat to workers
  * If worker is DEAD for a long time then delete it
  */
-func (c *Coordinator) CheckWorkers() {
-	ticker := time.NewTicker(c.HeartbeatDelay)
+func (c *Coordinator) checkWorkers() {
+	ticker := time.NewTicker(c.config.HeartbeatDelay)
 
 	for range ticker.C {
 		workers, err := database.GetAllWorkers(c.db)
@@ -476,7 +549,7 @@ func (c *Coordinator) CheckWorkers() {
 			go func() {
 				c.sendHB(worker)
 
-				if worker.Status == pworker.DEAD && time.Since(worker.LastHB) >= c.DeadDelay {
+				if worker.Status == pworker.DEAD && time.Since(worker.LastHB) >= c.config.DeadDelay {
 					err = c.DeleteWorker(worker)
 				} else {
 					err = c.UpdateWorkerStatusAndLastHB(worker)
@@ -492,6 +565,7 @@ func (c *Coordinator) CheckWorkers() {
 func (c *Coordinator) sendHB(worker *pworker.Worker) {
 	resp, err := http.Get("http://" + worker.Address + "/internal/api/worker/heartbeat")
 	if err != nil || resp.StatusCode != http.StatusOK {
+		log.Printf("Got no answer on HB: %v", err)
 		worker.Status = pworker.DEAD
 		return
 	}
