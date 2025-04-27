@@ -58,24 +58,22 @@ func NewCoordinator(db *sql.DB, rabbitmq *prabbitmq.RabbitMQManager,
 }
 
 func (c *Coordinator) Start() {
-	go c.consumeTaskResults()
-
+	go c.consumeTasksResults()
 	go c.checkWorkers()
 }
 
-func (c *Coordinator) consumeTaskResults() {
-consumeLoop:
+func (c *Coordinator) consumeTasksResults() {
+retryConn:
 	for {
 		ch, err := c.rabbitmq.GetChannel()
 		if err != nil {
-			log.Printf("Failed to get channel, retrying: %v", err)
-			time.Sleep(2 * time.Second)
+			log.Printf("Failed to get channel, retrying after delay: %v", err)
+			time.Sleep(c.rabbitmq.ConnRetryDelay)
 			continue
 		}
 
-		// Create a channel to detect connection closures
-		notifyClose := make(chan *amqp.Error)
-		ch.NotifyClose(notifyClose)
+		/* Create a channel to detect connection closures for consumer */
+		notifyCloseConsumer := ch.NotifyClose(make(chan *amqp.Error))
 
 		q, err := ch.QueueDeclare(
 			"coordinator",
@@ -86,8 +84,8 @@ consumeLoop:
 			nil,
 		)
 		if err != nil {
-			log.Printf("Failed to declare queue, retrying: %v", err)
-			time.Sleep(2 * time.Second)
+			log.Printf("Failed to declare queue, retrying after delay: %v", err)
+			time.Sleep(c.rabbitmq.ConnRetryDelay)
 			continue
 		}
 
@@ -97,8 +95,8 @@ consumeLoop:
 			false, // whether th QoS limits applies to all comsumers within the channel or only to this one
 		)
 		if err != nil {
-			log.Printf("Failed to declare queue, retrying: %v", err)
-			time.Sleep(2 * time.Second)
+			log.Printf("Failed to declare qos, retrying after delay: %v", err)
+			time.Sleep(c.rabbitmq.ConnRetryDelay)
 			continue
 		}
 
@@ -111,8 +109,8 @@ consumeLoop:
 			nil,
 		)
 		if err != nil {
-			log.Printf("Failed to declare queue, retrying: %v", err)
-			time.Sleep(2 * time.Second)
+			log.Printf("Failed to bind queue, retrying after delay: %v", err)
+			time.Sleep(c.rabbitmq.ConnRetryDelay)
 			continue
 		}
 
@@ -125,25 +123,26 @@ consumeLoop:
 			false,
 			nil)
 		if err != nil {
-			log.Printf("Failed to declare queue, retrying: %v", err)
-			time.Sleep(2 * time.Second)
+			log.Printf("Failed to define consumer, retrying after delay: %v", err)
+			time.Sleep(c.rabbitmq.ConnRetryDelay)
 			continue
 		}
 
 		for {
 			select {
-			case err := <-notifyClose:
-				if err != nil {
-					log.Printf("RabbitMQ channel/connection closed: %v", err)
-				}
-				// Break out of the consume loop to restart everything
-				goto consumeLoop
+			case err := <-notifyCloseConsumer:
+				log.Printf("RabbitMQ channel/connection closed: %v", err)
+				time.Sleep(c.rabbitmq.ConnRetryDelay)
+				/* connection is detected, start over again */
+				goto retryConn
 
 			case message, ok := <-messages:
 				if !ok {
-					// Channel closed
-					log.Println("Message channel closed, reconnecting...")
-					goto consumeLoop
+					/* channel closed */
+					log.Printf("RabbitMQ channel/connection closed")
+					time.Sleep(c.rabbitmq.ConnRetryDelay)
+					/* connection is detected, start over again */
+					goto retryConn
 				}
 
 				var task ptask.Task
@@ -172,7 +171,7 @@ func (c *Coordinator) PublishTask(worker *pworker.Worker, task_json bytes.Buffer
 		ch, err := c.rabbitmq.GetChannel()
 		if err != nil {
 			log.Printf("Failed to get channel, retrying: %v", err)
-			time.Sleep(2 * time.Second)
+			time.Sleep(c.rabbitmq.ConnRetryDelay)
 			continue
 		}
 
@@ -197,7 +196,7 @@ func (c *Coordinator) PublishTask(worker *pworker.Worker, task_json bytes.Buffer
 		}
 
 		log.Printf("Failed to publish message, retrying: %v", err)
-		time.Sleep(2 * time.Second)
+		time.Sleep(c.rabbitmq.ConnRetryDelay)
 	}
 }
 
@@ -208,7 +207,7 @@ func (c *Coordinator) PublishKillingTask(worker *pworker.Worker, task_json bytes
 		ch, err := c.rabbitmq.GetChannel()
 		if err != nil {
 			log.Printf("Failed to get channel, retrying: %v", err)
-			time.Sleep(2 * time.Second)
+			time.Sleep(c.rabbitmq.ConnRetryDelay)
 			continue
 		}
 
@@ -233,7 +232,7 @@ func (c *Coordinator) PublishKillingTask(worker *pworker.Worker, task_json bytes
 		}
 
 		log.Printf("Failed to publish message, retrying: %v", err)
-		time.Sleep(2 * time.Second)
+		time.Sleep(c.rabbitmq.ConnRetryDelay)
 	}
 }
 

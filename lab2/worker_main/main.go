@@ -64,7 +64,7 @@ func main() {
 	}
 	log.Printf("register worker sucessfully, my id = %d", workerContext.MyWorkerId)
 
-	/* Connect to RabbitMq */
+	/* connect to RabbitMq */
 	err := connectWorkerToRabbit()
 	if err != nil {
 		log.Fatalf("failed to connect to RabbitMq: %s", err)
@@ -84,12 +84,6 @@ func main() {
 	select {}
 }
 
-func configGetEnv() {
-	workerContext.Config.CoordinatorAddress = os.Getenv("COORDINATOR_ADDR")
-	workerContext.Config.RabbitMqConnStr = os.Getenv("RABBITMQ_URL")
-	workerContext.Config.ExchangeName = os.Getenv("EXCHANGE_NAME")
-}
-
 func parse_configs() error {
 	file, err := os.ReadFile("config.yaml")
 	if err != nil {
@@ -101,6 +95,12 @@ func parse_configs() error {
 	}
 
 	return nil
+}
+
+func configGetEnv() {
+	workerContext.Config.CoordinatorAddress = os.Getenv("COORDINATOR_ADDR")
+	workerContext.Config.RabbitMqConnStr = os.Getenv("RABBITMQ_URL")
+	workerContext.Config.ExchangeName = os.Getenv("EXCHANGE_NAME")
 }
 
 func register_worker() error {
@@ -146,7 +146,7 @@ func connectWorkerToRabbit() error {
 			workerContext.Config.RabbitMqConnStr,
 			workerContext.Config.RabbitHBDelay,
 			workerContext.Config.RabbitConnTimeout,
-			workerContext.Config.RetryConnectDelay,
+			workerContext.Config.RabbitConnRetryDelay,
 			workerContext.Config.ExchangeName)
 
 	return workerContext.RabbitMQ.ConnectAndMonitor()
@@ -168,7 +168,7 @@ retryConn:
 		ch, err := workerContext.RabbitMQ.GetChannel()
 		if err != nil {
 			log.Printf("Failed to get channel, retrying after delay: %v", err)
-			time.Sleep(workerContext.Config.RabbitConnRetryDelay)
+			time.Sleep(workerContext.RabbitMQ.ConnRetryDelay)
 			continue
 		}
 
@@ -185,7 +185,7 @@ retryConn:
 		)
 		if err != nil {
 			log.Printf("Failed to declare queue, retrying after delay: %v", err)
-			time.Sleep(workerContext.Config.RabbitConnRetryDelay)
+			time.Sleep(workerContext.RabbitMQ.ConnRetryDelay)
 			continue
 		}
 
@@ -196,7 +196,7 @@ retryConn:
 		)
 		if err != nil {
 			log.Printf("Failed to declare qos, retrying after delay: %v", err)
-			time.Sleep(workerContext.Config.RabbitConnRetryDelay)
+			time.Sleep(workerContext.RabbitMQ.ConnRetryDelay)
 			continue
 		}
 
@@ -209,7 +209,7 @@ retryConn:
 		)
 		if err != nil {
 			log.Printf("Failed to bind queue, retrying after delay: %v", err)
-			time.Sleep(workerContext.Config.RabbitConnRetryDelay)
+			time.Sleep(workerContext.RabbitMQ.ConnRetryDelay)
 			continue
 		}
 
@@ -223,7 +223,7 @@ retryConn:
 			nil)
 		if err != nil {
 			log.Printf("Failed to define consumer, retrying after delay: %v", err)
-			time.Sleep(workerContext.Config.RabbitConnRetryDelay)
+			time.Sleep(workerContext.RabbitMQ.ConnRetryDelay)
 			continue
 		}
 
@@ -231,7 +231,7 @@ retryConn:
 			select {
 			case err := <-notifyCloseConsumer:
 				log.Printf("RabbitMQ channel/connection closed: %v", err)
-				time.Sleep(workerContext.Config.RabbitConnRetryDelay)
+				time.Sleep(workerContext.RabbitMQ.ConnRetryDelay)
 				/* connection is detected, start over again */
 				goto retryConn
 
@@ -239,14 +239,14 @@ retryConn:
 				if !ok {
 					/* channel closed */
 					log.Printf("RabbitMQ channel/connection closed")
-					time.Sleep(workerContext.Config.RabbitConnRetryDelay)
+					time.Sleep(workerContext.RabbitMQ.ConnRetryDelay)
 					/* connection is detected, start over again */
 					goto retryConn
 				}
 
 				tag, ok := getMsgTag(&message)
 				if !ok {
-					time.Sleep(workerContext.Config.RabbitConnRetryDelay)
+					time.Sleep(workerContext.RabbitMQ.ConnRetryDelay)
 					/* connection is detected, start over again */
 					goto retryConn
 				}

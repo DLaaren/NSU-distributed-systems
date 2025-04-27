@@ -14,36 +14,26 @@ import (
 	prabbitmq "lab2/rabbitmq"
 )
 
-type WorkerContext struct {
-	Coordinator     *pcoordinator.Coordinator
-	DbConnStr       string
-	RabbitMqConnStr string
-	ExchangeName    string
-	Config          Config
+type ServerContext struct {
+	Coordinator *pcoordinator.Coordinator
+	Config      Config
 }
 
 type Config struct {
-	Port           string        `yaml:"port"`
-	HeartbeatDelay time.Duration `yaml:"heartbeat_delay"`
-	DeadDelay      time.Duration `yaml:"dead_delay"`
-	TaskTimeout    time.Duration `yaml:"task_timeout"`
-	TaskRetries    int           `yaml:"task_retries"`
+	Port                 string        `yaml:"port"`
+	HeartbeatDelay       time.Duration `yaml:"heartbeat_delay"`
+	DeadDelay            time.Duration `yaml:"dead_delay"`
+	TaskTimeout          time.Duration `yaml:"task_timeout"`
+	TaskRetries          int           `yaml:"task_retries"`
+	RabbitHBDelay        time.Duration `yaml:"rabbit_hb_delay"`
+	RabbitConnTimeout    time.Duration `yaml:"rabbit_conn_timeout"`
+	RabbitConnRetryDelay time.Duration `yaml:"rabbit_conn_retry_delay"`
+	DbConnStr            string
+	RabbitMqConnStr      string
+	ExchangeName         string
 }
 
-var context WorkerContext
-
-func parse_configs() error {
-	file, err := os.ReadFile("config.yaml")
-	if err != nil {
-		return err
-	}
-
-	if err := yaml.Unmarshal(file, &context.Config); err != nil {
-		return err
-	}
-
-	return nil
-}
+var serverContext ServerContext
 
 func main() {
 	log.SetPrefix("[Coordinator]: ")
@@ -55,63 +45,100 @@ func main() {
 	}
 	log.Println("configs were parsed sucessfully")
 
-	// "host=postgres port=5432 user=coordinator_user password=coordinator_password dbname=coordinator_db sslmode=disable"
-	context.DbConnStr = "host=" + os.Getenv("DB_HOST") +
-		" port=" + os.Getenv("DB_PORT") +
-		" user=" + os.Getenv("DB_USER") +
-		" password=" + os.Getenv("DB_PASSWORD") +
-		" dbname=" + os.Getenv("DB_NAME") +
-		" sslmode=disable"
-	context.RabbitMqConnStr = os.Getenv("RABBITMQ_URL")
-	context.ExchangeName = os.Getenv("EXCHANGE_NAME")
+	/* get configs from envs */
+	configGetEnv()
 
 	/* Connect to database*/
-	db, err := database.Initdb(context.DbConnStr)
+	db, err := database.Initdb(serverContext.Config.DbConnStr)
 	if err != nil {
 		log.Fatalf("cannot connect to database with connStr \"%s\": %s\n",
-			context.DbConnStr, err)
+			serverContext.Config.DbConnStr, err)
 	}
 
-	/* Connect to RabbitMq */
-	rabbitmq := prabbitmq.NewRabbitMQManager(context.RabbitMqConnStr, context.ExchangeName)
-	err = rabbitmq.Connect()
+	/* connect to RabbitMq */
+	rabbitmq, err := connectCoordinatorToRabbit()
 	if err != nil {
-		log.Fatalf("cannot connecgt to RabbitMq: %s\n", err)
+		log.Fatalf("failed to connect to RabbitMq: %s", err)
 	}
+	log.Printf("connect to RabbitMq\n")
 
 	/* Create coordinator */
-	context.Coordinator =
+	serverContext.Coordinator =
 		pcoordinator.NewCoordinator(db,
 			rabbitmq,
-			context.Config.HeartbeatDelay,
-			context.Config.DeadDelay,
-			context.Config.TaskTimeout,
-			context.Config.TaskRetries)
+			serverContext.Config.HeartbeatDelay,
+			serverContext.Config.DeadDelay,
+			serverContext.Config.TaskTimeout,
+			serverContext.Config.TaskRetries)
 
-	err = context.Coordinator.RecoverAfterCrash()
+	/* recover after crash */
+	err = serverContext.Coordinator.RecoverAfterCrash()
 	if err != nil {
 		log.Fatalf("cannot recover after crash: %s\n", err)
 	}
 	log.Printf("successfully recover after crash\n")
 
 	/* define handlers */
-	http.HandleFunc("/api/hash/status", GetRequestStatusHandler(context.Coordinator))
-	http.HandleFunc("/api/hash/crack", SubmitRequestCrackHandler(context.Coordinator))
-	http.HandleFunc("/internal/api/worker/register", RegisterNewWorkerHandler(context.Coordinator))
-	http.HandleFunc("/internal/api/task/result", GetTaskResultHandler(context.Coordinator))
-
+	registerHttpHandlers()
 	log.Println("all handlers were set up")
 
-	go func() {
-		log.Printf("server is listening on port %s\n", context.Config.Port)
-		if err := http.ListenAndServe(":"+context.Config.Port, nil); err != nil {
-			log.Printf("error while starting server: %s\n", err)
-			return
-		}
-	}()
+	/* listen on port for coordinator's requests */
+	go listenOnPort()
 
-	context.Coordinator.Start()
+	/* star coordinator work */
+	serverContext.Coordinator.Start()
 
 	/* to keep the main goroutine alive */
 	select {}
+}
+
+func parse_configs() error {
+	file, err := os.ReadFile("config.yaml")
+	if err != nil {
+		return err
+	}
+
+	if err := yaml.Unmarshal(file, &serverContext.Config); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func configGetEnv() {
+	// "host=postgres port=5432 user=coordinator_user password=coordinator_password dbname=coordinator_db sslmode=disable"
+	serverContext.Config.DbConnStr = "host=" + os.Getenv("DB_HOST") +
+		" port=" + os.Getenv("DB_PORT") +
+		" user=" + os.Getenv("DB_USER") +
+		" password=" + os.Getenv("DB_PASSWORD") +
+		" dbname=" + os.Getenv("DB_NAME") +
+		" sslmode=disable"
+	serverContext.Config.RabbitMqConnStr = os.Getenv("RABBITMQ_URL")
+	serverContext.Config.ExchangeName = os.Getenv("EXCHANGE_NAME")
+}
+
+func connectCoordinatorToRabbit() (*prabbitmq.RabbitMQManager, error) {
+	RabbitMQ :=
+		prabbitmq.NewRabbitMQManager(
+			serverContext.Config.RabbitMqConnStr,
+			serverContext.Config.RabbitHBDelay,
+			serverContext.Config.RabbitConnTimeout,
+			serverContext.Config.RabbitConnRetryDelay,
+			serverContext.Config.ExchangeName)
+	return RabbitMQ, RabbitMQ.ConnectAndMonitor()
+}
+
+func registerHttpHandlers() {
+	http.HandleFunc("/api/hash/status", GetRequestStatusHandler(serverContext.Coordinator))
+	http.HandleFunc("/api/hash/crack", SubmitRequestCrackHandler(serverContext.Coordinator))
+	http.HandleFunc("/internal/api/worker/register", RegisterNewWorkerHandler(serverContext.Coordinator))
+	http.HandleFunc("/internal/api/task/result", GetTaskResultHandler(serverContext.Coordinator))
+}
+
+func listenOnPort() {
+	log.Printf("server is listening on port %s\n", serverContext.Config.Port)
+	if err := http.ListenAndServe(":"+serverContext.Config.Port, nil); err != nil {
+		log.Printf("error while starting server: %s\n", err)
+		return
+	}
 }
