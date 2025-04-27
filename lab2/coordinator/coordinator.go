@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -35,14 +34,14 @@ type Coordinator struct {
 	db       *sql.DB
 	rabbitmq *prabbitmq.RabbitMQManager
 	config   CoordConfig
-	RWmutex  sync.RWMutex
 }
 
 /* Init Coordinator instance */
 func NewCoordinator(db *sql.DB, rabbitmq *prabbitmq.RabbitMQManager,
 	hbDelay time.Duration, deadDelay time.Duration,
 	taskTimeout time.Duration, taskRetries int) *Coordinator {
-	defer log.Printf("Coordinator was created; HbDelay = %d; deadDelay = %d", hbDelay, deadDelay)
+
+	defer log.Printf("Coordinator was created\n")
 
 	c := &Coordinator{
 		db:       db,
@@ -65,6 +64,7 @@ func (c *Coordinator) Start() {
 }
 
 func (c *Coordinator) consumeTaskResults() {
+consumeLoop:
 	for {
 		ch, err := c.rabbitmq.GetChannel()
 		if err != nil {
@@ -73,7 +73,11 @@ func (c *Coordinator) consumeTaskResults() {
 			continue
 		}
 
-		_, err = ch.QueueDeclare(
+		// Create a channel to detect connection closures
+		notifyClose := make(chan *amqp.Error)
+		ch.NotifyClose(notifyClose)
+
+		q, err := ch.QueueDeclare(
 			"coordinator",
 			true,
 			false,
@@ -100,8 +104,8 @@ func (c *Coordinator) consumeTaskResults() {
 
 		/* bind queue to exchange with worker ID as routing key */
 		err = ch.QueueBind(
-			"coordinator",
-			"coordinator", // binding key = worker ID
+			q.Name,
+			q.Name,
 			c.rabbitmq.ExchangeName,
 			false,
 			nil,
@@ -113,7 +117,7 @@ func (c *Coordinator) consumeTaskResults() {
 		}
 
 		messages, err := ch.Consume(
-			"coordinator",
+			q.Name,
 			"",
 			false,
 			false,
@@ -126,21 +130,37 @@ func (c *Coordinator) consumeTaskResults() {
 			continue
 		}
 
-		for message := range messages {
-			var task ptask.Task
-			if err := json.Unmarshal(message.Body, &task); err != nil {
-				log.Printf("Failed to decode task: %v", err)
-				message.Nack(false, false)
-				continue
-			}
+		for {
+			select {
+			case err := <-notifyClose:
+				if err != nil {
+					log.Printf("RabbitMQ channel/connection closed: %v", err)
+				}
+				// Break out of the consume loop to restart everything
+				goto consumeLoop
 
-			err := c.UpdateTask(&task)
-			if err != nil {
-				log.Printf("Invalid JSON payload: %v", err)
-				message.Nack(false, false)
-				continue
+			case message, ok := <-messages:
+				if !ok {
+					// Channel closed
+					log.Println("Message channel closed, reconnecting...")
+					goto consumeLoop
+				}
+
+				var task ptask.Task
+				if err := json.Unmarshal(message.Body, &task); err != nil {
+					log.Printf("Failed to decode task: %v", err)
+					message.Nack(false, false)
+					continue
+				}
+
+				err := c.UpdateTask(&task)
+				if err != nil {
+					log.Printf("Invalid JSON payload: %v", err)
+					message.Nack(false, false)
+					continue
+				}
+				message.Ack(false)
 			}
-			message.Ack(false)
 		}
 	}
 }
