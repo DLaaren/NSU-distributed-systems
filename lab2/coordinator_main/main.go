@@ -9,12 +9,12 @@ import (
 	_ "github.com/lib/pq"
 	"gopkg.in/yaml.v3"
 
-	"lab2/coordinator"
+	pcoordinator "lab2/coordinator"
 	"lab2/database"
 	prabbitmq "lab2/rabbitmq"
 )
 
-type ServerContext struct {
+type WorkerContext struct {
 	Coordinator     *pcoordinator.Coordinator
 	DbConnStr       string
 	RabbitMqConnStr string
@@ -30,7 +30,7 @@ type Config struct {
 	TaskRetries    int           `yaml:"task_retries"`
 }
 
-var context ServerContext
+var context WorkerContext
 
 func parse_configs() error {
 	file, err := os.ReadFile("config.yaml")

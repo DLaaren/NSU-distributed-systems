@@ -2,3 +2,6 @@ port: 8081
 max_parallel_tasks: 1
 retry_connect_delay: 1m
 max_retries: 3
+rabbit_hb_delay: 10s
+rabbit_conn_timeout: 1m
+rabbit_conn_retry_delay: 5s

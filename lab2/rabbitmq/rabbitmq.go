@@ -1,7 +1,6 @@
 package prabbitmq
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -14,38 +13,39 @@ import (
 
 type RabbitMQManager struct {
 	connStr         string
+	HBdelay         time.Duration
+	ConnTimeout     time.Duration
+	ConnRetryDelay  time.Duration
 	ExchangeName    string
 	conn            *amqp.Connection
 	Channel         *amqp.Channel
 	notifyConnClose chan *amqp.Error
 	mutex           sync.RWMutex
-	ctx             context.Context
-	cancel          context.CancelFunc
 }
 
-func NewRabbitMQManager(connStr string, exchangeName string) *RabbitMQManager {
-	ctx, cancel := context.WithCancel(context.Background())
+func NewRabbitMQManager(connStr string, hbdelay time.Duration, connTimeout time.Duration, connRetryDelay time.Duration, exchangeName string) *RabbitMQManager {
 	return &RabbitMQManager{
-		connStr:      connStr,
-		ExchangeName: exchangeName,
-		ctx:          ctx,
-		cancel:       cancel,
+		connStr:        connStr,
+		HBdelay:        hbdelay,
+		ConnTimeout:    connTimeout,
+		ConnRetryDelay: connRetryDelay,
+		ExchangeName:   exchangeName,
 	}
 }
 
-func (r *RabbitMQManager) Connect() error {
+func (r *RabbitMQManager) ConnectAndMonitor() error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	// Close existing connection if any
+	/* close existing connection if any */
 	if r.conn != nil {
 		r.conn.Close()
 	}
 
 	config := amqp.Config{
-		Heartbeat: 10 * time.Second,
+		Heartbeat: r.HBdelay,
 		Dial: func(network, addr string) (net.Conn, error) {
-			return net.DialTimeout(network, addr, time.Minute)
+			return net.DialTimeout(network, addr, r.ConnTimeout)
 		},
 	}
 
@@ -57,19 +57,17 @@ func (r *RabbitMQManager) Connect() error {
 	r.conn = conn
 	r.notifyConnClose = r.conn.NotifyClose(make(chan *amqp.Error))
 
-	// Create initial channel
 	if err := r.createChannel(); err != nil {
 		return fmt.Errorf("failed to create channel: %v", err)
 	}
 
-	// Start connection monitor
 	go r.monitorConnection()
 
 	return nil
 }
 
 func (r *RabbitMQManager) createChannel() error {
-	// Close existing channel if any
+	/* close existing channel if any */
 	if r.Channel != nil {
 		r.Channel.Close()
 	}
@@ -107,27 +105,17 @@ func (r *RabbitMQManager) GetChannel() (*amqp.Channel, error) {
 }
 
 func (r *RabbitMQManager) monitorConnection() {
+	err := <-r.notifyConnClose
+	if err != nil {
+		log.Printf("RabbitMQ connection closed: %v", err)
+	}
 
-	select {
-	case err := <-r.notifyConnClose:
-		if err != nil {
-			log.Printf("RabbitMQ connection closed: %v", err)
+	/* attempt reconnection */
+	for {
+		if err := r.ConnectAndMonitor(); err == nil {
+			log.Println("Successfully reconnected to RabbitMQ")
+			return /* ConnectAndMonitor wil call monitorConnection again */
 		}
-
-		// Attempt reconnection
-		for {
-			select {
-			case <-r.ctx.Done():
-				return
-			default:
-				if err := r.Connect(); err == nil {
-					log.Println("Successfully reconnected to RabbitMQ")
-					return
-				}
-				time.Sleep(time.Second * 20)
-			}
-		}
-	case <-r.ctx.Done():
-		return
+		time.Sleep(r.ConnRetryDelay)
 	}
 }
